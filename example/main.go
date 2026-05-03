@@ -3,14 +3,12 @@ package main
 import (
 	"context"
 	"log"
-	"math/rand/v2"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sknv/floww"
@@ -92,19 +90,8 @@ func main() {
 	log.Println("Workflow worker started successfully")
 
 	// Example: start order workflow
-	if err = floww.ExecuteWorkflowAsync(
-		ctx,
-		storage,
-		db,
-		OrderWorkflow,
-		uuid.Must(uuid.NewV7()),
-		OrderInput{
-			UserID: uuid.NewString(),
-			Amount: rand.IntN(100),
-		},
-		floww.WithWorkflowMaxAttempts(3),
-	); err != nil {
-		log.Printf("Failed to execute example workflow: %v", err)
+	if err = EnqueueOrderWorkflow(ctx, storage, db); err != nil {
+		log.Printf("Failed to enqueue example workflow: %v", err)
 	}
 
 	// Wait for interrupt signal to gracefully shutdown

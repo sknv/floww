@@ -20,7 +20,7 @@ type WorkflowStatus string
 
 const (
 	WorkflowStatusRunning   WorkflowStatus = "running"
-	WorkflowStatusAborted   WorkflowStatus = "aborted"
+	WorkflowStatusAborted   WorkflowStatus = "aborted" // unused for now
 	WorkflowStatusCompleted WorkflowStatus = "completed"
 	WorkflowStatusFailed    WorkflowStatus = "failed"
 )

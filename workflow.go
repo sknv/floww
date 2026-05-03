@@ -197,9 +197,9 @@ func WithWorkflowScheduledAt(t time.Time) WorkflowOption {
 	}
 }
 
-// ExecuteWorkflowAsync enqueues a workflow for asynchronous execution.
+// EnqueueWorkflow enqueues a workflow for asynchronous execution.
 // The idempotencyKey prevents duplicate submissions for the same logical request.
-func ExecuteWorkflowAsync[I any](
+func EnqueueWorkflow[I any](
 	ctx context.Context,
 	storage Storage,
 	txer TxBeginner,

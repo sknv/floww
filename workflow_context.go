@@ -74,7 +74,8 @@ func ExecuteActivityAsync[I any, O any](
 	}, nil
 }
 
-// ExecuteActivity schedules an activity and returns its result, suspending the workflow if the activity is still pending.
+// ExecuteActivity schedules an activity and returns its result,
+// suspending the workflow if the activity is still pending.
 //
 //nolint:ireturn // returns a generic result
 func ExecuteActivity[I any, O any](
