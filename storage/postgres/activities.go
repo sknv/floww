@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -168,9 +167,7 @@ func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]f
 			&activity.UpdatedAt,
 		)
 		if err != nil {
-			log.Printf("[Floww][ERROR] Failed to scan activity: %v", err)
-
-			continue
+			return nil, fmt.Errorf("scan activity: %w", err)
 		}
 
 		activities = append(activities, activity)
@@ -234,7 +231,7 @@ func (s *Storage) completeActivity(
 
 		outputBytes, err = s.encoder.Encode(output)
 		if err != nil {
-			return fmt.Errorf("encode input: %w", err)
+			return fmt.Errorf("encode output: %w", err)
 		}
 	}
 
@@ -247,7 +244,7 @@ func (s *Storage) completeActivity(
 		WHERE id = $1
 	`
 
-	cmd, err := execer.Exec(ctx, sql, id, floww.WorkflowStatusCompleted, outputBytes)
+	cmd, err := execer.Exec(ctx, sql, id, floww.ActivityStatusCompleted, outputBytes)
 	if err != nil {
 		return fmt.Errorf("exec activity completing query: %w", err)
 	}

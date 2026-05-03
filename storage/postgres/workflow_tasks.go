@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -177,9 +176,7 @@ func (s *Storage) ListActiveWorkflowTasks(ctx context.Context, batchSize uint) (
 			&task.Workflow.UpdatedAt,
 		)
 		if err != nil {
-			log.Printf("[Floww][ERROR] Failed to scan workflow task: %v", err)
-
-			continue
+			return nil, fmt.Errorf("scan workflow task: %w", err)
 		}
 
 		tasks = append(tasks, task)
@@ -195,26 +192,60 @@ func (s *Storage) ListActiveWorkflowTasks(ctx context.Context, batchSize uint) (
 // CompleteWorkflowTask marks the workflow task as completed and clears
 // the workflow error message. Returns an error if the task does not exist.
 func (s *Storage) CompleteWorkflowTask(ctx context.Context, workflowTaskID uuid.UUID, workflowID uuid.UUID) error {
-	const sql = `
-		WITH updated_task AS (
-		  UPDATE floww_workflow_tasks
-		  SET status = $3,
-		      completed_at = now()
-		  WHERE id = $1
-		)
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if txErr := s.completeWorkflowTask(ctx, tx, workflowTaskID); txErr != nil {
+			return fmt.Errorf("complete workflow task tx: %w", txErr)
+		}
 
-		UPDATE floww_workflows
-		SET error_message = NULL
-		WHERE id = $2
+		if txErr := s.clearWorkflowError(ctx, tx, workflowID); txErr != nil {
+			return fmt.Errorf("clear workflow error tx: %w", txErr)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("exec transaction: %w", err)
+	}
+
+	return nil
+}
+
+// completeWorkflowTask marks a workflow task as completed.
+func (s *Storage) completeWorkflowTask(ctx context.Context, execer floww.Execer, id uuid.UUID) error {
+	const sql = `
+		UPDATE floww_workflow_tasks
+		SET status = $2,
+		    completed_at = now()
+		WHERE id = $1
 	`
 
-	cmd, err := s.db.Exec(ctx, sql, workflowTaskID, workflowID, floww.WorkflowTaskStatusCompleted)
+	cmd, err := execer.Exec(ctx, sql, id, floww.WorkflowTaskStatusCompleted)
 	if err != nil {
 		return fmt.Errorf("exec workflow task completing query: %w", err)
 	}
 
 	if cmd.RowsAffected() == 0 {
-		return fmt.Errorf("workflow task with id '%s' was not marked as completed", workflowTaskID)
+		return fmt.Errorf("workflow task with id '%s' was not marked as completed", id)
+	}
+
+	return nil
+}
+
+// clearWorkflowError clears the error message for a workflow.
+func (s *Storage) clearWorkflowError(ctx context.Context, execer floww.Execer, id uuid.UUID) error {
+	const sql = `
+		UPDATE floww_workflows
+		SET error_message = NULL
+		WHERE id = $1
+	`
+
+	cmd, err := execer.Exec(ctx, sql, id)
+	if err != nil {
+		return fmt.Errorf("exec workflow error clearing query: %w", err)
+	}
+
+	if cmd.RowsAffected() == 0 {
+		return fmt.Errorf("workflow with id '%s' was not found", id)
 	}
 
 	return nil
@@ -229,35 +260,71 @@ func (s *Storage) ReScheduleWorkflowTask(
 	scheduledAt time.Time,
 	errorMessage string,
 ) error {
-	const sql = `
-		WITH updated_task AS (
-		  UPDATE floww_workflow_tasks
-		  SET status = $3,
-		      scheduled_at = $4
-		  WHERE id = $1
-		)
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if txErr := s.reScheduleWorkflowTask(ctx, tx, workflowTaskID, scheduledAt); txErr != nil {
+			return fmt.Errorf("reschedule workflow task tx: %w", txErr)
+		}
 
-		UPDATE floww_workflows
-		SET attempts = attempts + 1,
-		    error_message = $5
-		WHERE id = $2
+		if txErr := s.incrementWorkflowAttempts(ctx, tx, workflowID, errorMessage); txErr != nil {
+			return fmt.Errorf("increment workflow attempts tx: %w", txErr)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("exec transaction: %w", err)
+	}
+
+	return nil
+}
+
+// reScheduleWorkflowTask moves the task back to pending state with a new schedule time.
+func (s *Storage) reScheduleWorkflowTask(
+	ctx context.Context,
+	execer floww.Execer,
+	id uuid.UUID,
+	scheduledAt time.Time,
+) error {
+	const sql = `
+		UPDATE floww_workflow_tasks
+		SET status = $2,
+		    scheduled_at = $3
+		WHERE id = $1
 	`
 
-	cmd, err := s.db.Exec(
-		ctx,
-		sql,
-		workflowTaskID,
-		workflowID,
-		floww.WorkflowTaskStatusPending,
-		scheduledAt,
-		errorMessage,
-	)
+	cmd, err := execer.Exec(ctx, sql, id, floww.WorkflowTaskStatusPending, scheduledAt)
 	if err != nil {
 		return fmt.Errorf("exec workflow task rescheduling query: %w", err)
 	}
 
 	if cmd.RowsAffected() == 0 {
-		return fmt.Errorf("workflow task with id '%s' was not rescheduled", workflowTaskID)
+		return fmt.Errorf("workflow task with id '%s' was not rescheduled", id)
+	}
+
+	return nil
+}
+
+// incrementWorkflowAttempts increments workflow attempts and updates the workflow error message.
+func (s *Storage) incrementWorkflowAttempts(
+	ctx context.Context,
+	execer floww.Execer,
+	id uuid.UUID,
+	errorMessage string,
+) error {
+	const sql = `
+		UPDATE floww_workflows
+		SET attempts = attempts + 1,
+		    error_message = $2
+		WHERE id = $1
+	`
+
+	cmd, err := execer.Exec(ctx, sql, id, errorMessage)
+	if err != nil {
+		return fmt.Errorf("exec workflow attempts incrementing query: %w", err)
+	}
+
+	if cmd.RowsAffected() == 0 {
+		return fmt.Errorf("workflow with id '%s' was not found", id)
 	}
 
 	return nil
