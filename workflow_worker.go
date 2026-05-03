@@ -132,7 +132,6 @@ func (w *WorkflowWorker) Start(ctx context.Context) {
 
 		w.runHandlerWorker(workerCtx)
 	})
-
 }
 
 func (w *WorkflowWorker) Stop(ctx context.Context) error {
@@ -181,7 +180,6 @@ func (w *WorkflowWorker) runHandlerWorker(ctx context.Context) {
 					return
 				default:
 				}
-
 			}
 		}
 	}
@@ -249,7 +247,10 @@ func (w *WorkflowWorker) handleWorkflowTask(ctx context.Context, task *WorkflowT
 		)
 
 		return w.handleWorkflowTaskError(
-			ctx, &workflowHandlerWrapper{}, task, fmt.Errorf("no handler registered for workflow '%s'", task.Workflow.Name),
+			ctx,
+			&workflowHandlerWrapper{}, //nolint:exhaustruct // empty no-op handler
+			task,
+			fmt.Errorf("no handler registered for workflow '%s'", task.Workflow.Name),
 		)
 	}
 

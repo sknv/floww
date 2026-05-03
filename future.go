@@ -10,6 +10,7 @@ type Future[O any] struct {
 	event mo.Option[HistoryEvent]
 }
 
+//nolint:ireturn // returns a generic result
 func (f Future[O]) Get() (O, error) {
 	var out O
 

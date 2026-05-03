@@ -124,7 +124,13 @@ const _fetchActivitiesSQL = `
 `
 
 func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]floww.ActivityRecord, error) {
-	rows, err := s.db.Query(ctx, _fetchActivitiesSQL, floww.ActivityStatusPending, floww.ActivityStatusRunning, batchSize)
+	rows, err := s.db.Query(
+		ctx,
+		_fetchActivitiesSQL,
+		floww.ActivityStatusPending,
+		floww.ActivityStatusRunning,
+		batchSize,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("query activities: %w", err)
 	}

@@ -22,7 +22,15 @@ func (s *Storage) InsertWorkflow(
 ) error {
 	err := pgx.BeginFunc(ctx, txer, func(tx pgx.Tx) error {
 		if txErr := s.insertWorkflow(
-			ctx, tx, name, id, idempotencyKey, input, options.Priority(), options.MaxAttempts(), options.StuckTimeoutMillis(),
+			ctx,
+			tx,
+			name,
+			id,
+			idempotencyKey,
+			input,
+			options.Priority(),
+			options.MaxAttempts(),
+			options.StuckTimeoutMillis(),
 		); txErr != nil {
 			return fmt.Errorf("insert workflow tx: %w", txErr)
 		}

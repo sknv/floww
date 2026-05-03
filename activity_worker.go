@@ -111,7 +111,6 @@ func (w *ActivityWorker) Start(ctx context.Context) {
 
 		w.runHandlerWorker(workerCtx)
 	})
-
 }
 
 func (w *ActivityWorker) Stop(ctx context.Context) error {
@@ -160,7 +159,6 @@ func (w *ActivityWorker) runHandlerWorker(ctx context.Context) {
 					return
 				default:
 				}
-
 			}
 		}
 	}
@@ -228,7 +226,10 @@ func (w *ActivityWorker) handleActivity(ctx context.Context, activity *ActivityR
 		)
 
 		return w.handleActivityError(
-			ctx, &activityHandlerWrapper{}, activity, fmt.Errorf("no handler registered for activity '%s'", activity.Name),
+			ctx,
+			&activityHandlerWrapper{}, //nolint:exhaustruct // empty no-op handler
+			activity,
+			fmt.Errorf("no handler registered for activity '%s'", activity.Name),
 		)
 	}
 

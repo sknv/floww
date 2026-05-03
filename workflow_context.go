@@ -9,7 +9,7 @@ import (
 )
 
 type WorkflowContext struct {
-	ctx        context.Context
+	ctx        context.Context //nolint:containedctx // wrapper
 	workflowID uuid.UUID
 	storage    Storage
 	history    HistoryEvents
@@ -68,6 +68,7 @@ func ExecuteActivityAsync[I any, O any](
 	}, nil
 }
 
+//nolint:ireturn // returns a generic result
 func ExecuteActivity[I any, O any](
 	ctx *WorkflowContext,
 	activity Activity[I, O],

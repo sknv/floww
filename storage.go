@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
+//nolint:interfacebloat // single unit
 type Storage interface {
 	InsertWorkflow(
 		ctx context.Context,
