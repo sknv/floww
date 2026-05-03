@@ -8,6 +8,7 @@ import (
 	"github.com/samber/mo"
 )
 
+// WorkflowContext is passed to workflow handlers and provides access to activity scheduling and workflow metadata.
 type WorkflowContext struct {
 	ctx        context.Context //nolint:containedctx // wrapper
 	workflowID uuid.UUID
@@ -15,6 +16,7 @@ type WorkflowContext struct {
 	history    HistoryEvents
 }
 
+// NewWorkflowContext constructs a WorkflowContext for the given workflow execution.
 func NewWorkflowContext(
 	ctx context.Context,
 	workflowID uuid.UUID,
@@ -29,14 +31,18 @@ func NewWorkflowContext(
 	}
 }
 
+// Context returns the underlying Go context.
 func (c *WorkflowContext) Context() context.Context {
 	return c.ctx
 }
 
+// WorkflowID returns the unique identifier of the running workflow.
 func (c *WorkflowContext) WorkflowID() uuid.UUID {
 	return c.workflowID
 }
 
+// ExecuteActivityAsync schedules an activity and returns a Future for its result without blocking.
+// If the activity has already completed (found in history), the Future resolves immediately.
 func ExecuteActivityAsync[I any, O any](
 	ctx *WorkflowContext,
 	activity Activity[I, O],
@@ -68,6 +74,8 @@ func ExecuteActivityAsync[I any, O any](
 	}, nil
 }
 
+// ExecuteActivity schedules an activity and returns its result, suspending the workflow if the activity is still pending.
+//
 //nolint:ireturn // returns a generic result
 func ExecuteActivity[I any, O any](
 	ctx *WorkflowContext,

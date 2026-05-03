@@ -12,6 +12,9 @@ import (
 	"github.com/sknv/floww"
 )
 
+// InsertActivity inserts a new activity record.
+// It encodes the input payload (if provided) and stores scheduling and execution options.
+// If an activity with the same idempotency key already exists, the insert is ignored.
 func (s *Storage) InsertActivity(
 	ctx context.Context,
 	name string,
@@ -123,6 +126,9 @@ const _fetchActivitiesSQL = `
 	          a.updated_at
 `
 
+// ListActiveActivities fetches a batch of activities that are ready to run.
+// It selects pending or stuck activities, locks them, marks them as running,
+// increments attempt counters, and returns the updated records.
 func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]floww.ActivityRecord, error) {
 	rows, err := s.db.Query(
 		ctx,
@@ -177,6 +183,8 @@ func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]f
 	return activities, nil
 }
 
+// CompleteActivity marks the activity as completed and schedules the next workflow task.
+// The operation is executed in a transaction to ensure atomicity.
 func (s *Storage) CompleteActivity(
 	ctx context.Context,
 	activityID uuid.UUID,
@@ -204,6 +212,15 @@ func (s *Storage) CompleteActivity(
 	return nil
 }
 
+// completeActivity updates an activity record as completed.
+//
+// It encodes the output payload (if provided), sets the status to completed,
+// clears any previous error, and records completion timestamp.
+//
+// IMPORTANT:
+// - Must be executed within a transaction when part of a larger workflow step.
+// - Uses the provided execer (tx or db) to allow composition.
+// - Fails if no rows are affected (i.e., activity does not exist).
 func (s *Storage) completeActivity(
 	ctx context.Context,
 	execer floww.Execer,
@@ -242,6 +259,8 @@ func (s *Storage) completeActivity(
 	return nil
 }
 
+// ReScheduleActivity moves the activity back to pending state with a new schedule time
+// and updates the error message describing the reason for rescheduling.
 func (s *Storage) ReScheduleActivity(
 	ctx context.Context,
 	id uuid.UUID,
@@ -268,6 +287,8 @@ func (s *Storage) ReScheduleActivity(
 	return nil
 }
 
+// FailActivity marks the activity as failed and also fails the associated workflow.
+// The operation is executed in a transaction to keep both updates consistent.
 func (s *Storage) FailActivity(
 	ctx context.Context,
 	activityID uuid.UUID,
@@ -292,6 +313,14 @@ func (s *Storage) FailActivity(
 	return nil
 }
 
+// failActivity marks an activity as failed.
+//
+// It sets the failure status, stores the error message, and records completion time.
+//
+// IMPORTANT:
+// - Designed to be called inside a transaction together with workflow failure.
+// - Does not validate current state transitions (caller responsibility).
+// - Returns an error if the activity does not exist.
 func (s *Storage) failActivity(
 	ctx context.Context,
 	execer floww.Execer,

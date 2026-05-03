@@ -12,6 +12,15 @@ import (
 	"github.com/sknv/floww"
 )
 
+// insertWorkflowTask creates a workflow task derived from the workflow record.
+//
+// It copies priority and timeout configuration from the workflow at insert time.
+//
+// IMPORTANT:
+// - Must be called inside a transaction together with workflow creation or progression.
+// - Uses INSERT ... SELECT to ensure workflow existence.
+// - ON CONFLICT DO NOTHING makes this operation idempotent for the same task ID.
+// - If the workflow does not exist, no row is inserted (no explicit error).
 func (s *Storage) insertWorkflowTask(
 	ctx context.Context,
 	execer floww.Execer,
@@ -125,6 +134,9 @@ const _fetchWorkflowTasksSQL = `
 	  JOIN floww_workflows AS w ON w.id = ut.workflow_id
 `
 
+// ListActiveWorkflowTasks fetches a batch of workflow tasks ready for execution.
+// It selects pending or stuck tasks, locks them, marks them as running,
+// and returns both task and associated workflow data.
 func (s *Storage) ListActiveWorkflowTasks(ctx context.Context, batchSize uint) ([]floww.WorkflowTaskRecord, error) {
 	rows, err := s.db.Query(
 		ctx, _fetchWorkflowTasksSQL, floww.WorkflowTaskStatusPending, floww.WorkflowTaskStatusRunning, batchSize,
@@ -180,6 +192,8 @@ func (s *Storage) ListActiveWorkflowTasks(ctx context.Context, batchSize uint) (
 	return tasks, nil
 }
 
+// CompleteWorkflowTask marks the workflow task as completed and clears
+// the workflow error message. Returns an error if the task does not exist.
 func (s *Storage) CompleteWorkflowTask(ctx context.Context, workflowTaskID uuid.UUID, workflowID uuid.UUID) error {
 	const sql = `
 		WITH updated_task AS (
@@ -206,6 +220,8 @@ func (s *Storage) CompleteWorkflowTask(ctx context.Context, workflowTaskID uuid.
 	return nil
 }
 
+// ReScheduleWorkflowTask moves the task back to pending state with a new schedule time,
+// increments workflow attempts, and updates the workflow error message.
 func (s *Storage) ReScheduleWorkflowTask(
 	ctx context.Context,
 	workflowTaskID uuid.UUID,
@@ -247,6 +263,8 @@ func (s *Storage) ReScheduleWorkflowTask(
 	return nil
 }
 
+// FailWorkflowTask marks the workflow task as failed and also fails the associated workflow.
+// The operation is executed in a transaction to ensure consistency.
 func (s *Storage) FailWorkflowTask(
 	ctx context.Context,
 	workflowTaskID uuid.UUID,
@@ -271,6 +289,14 @@ func (s *Storage) FailWorkflowTask(
 	return nil
 }
 
+// failWorkflowTask marks a workflow task as failed.
+//
+// It updates the task status and completion timestamp.
+//
+// IMPORTANT:
+// - Intended to be used within a transaction together with workflow failure.
+// - Does not update the workflow itself (caller must handle that).
+// - Returns an error if the task does not exist.
 func (s *Storage) failWorkflowTask(ctx context.Context, execer floww.Execer, id uuid.UUID) error {
 	const sql = `
 		UPDATE floww_workflow_tasks

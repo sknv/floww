@@ -23,6 +23,7 @@ type (
 		CleanupBatchSize  uint          // how many records should we delete at once
 	}
 
+	// WorkerConfig aggregates all configuration sections for a workflow or activity worker.
 	WorkerConfig struct {
 		Poll        PollConfig
 		Processing  ProcessingConfig

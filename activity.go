@@ -6,10 +6,12 @@ import (
 	"time"
 )
 
+// Activity represents a named unit of work with typed input I and output O.
 type Activity[I any, O any] struct {
 	Name string
 }
 
+// NewActivity creates a new Activity with the given name.
 func NewActivity[I any, O any](name string) Activity[I, O] {
 	return Activity[I, O]{
 		Name: name,
@@ -38,6 +40,7 @@ func (h *activityHandlerWrapper) calculateBackoff(attempt uint, defaultBackoff t
 // ActivityHandlerOption is a function to configure activity handler options.
 type ActivityHandlerOption func(*activityHandlerWrapper)
 
+// WithActivityBackoffCalculator sets a custom backoff calculator for activity retries.
 func WithActivityBackoffCalculator(backoffCalculator BackoffCalculator) ActivityHandlerOption {
 	return func(h *activityHandlerWrapper) {
 		h.backoffCalculator = backoffCalculator
@@ -118,16 +121,19 @@ func WithActivityScheduledAt(t time.Time) ActivityOption {
 // Activity registry
 //
 
+// ActivityRegistry holds registered activity handlers keyed by activity name.
 type ActivityRegistry struct {
 	handlers map[string]*activityHandlerWrapper
 }
 
+// NewActivityRegistry creates a new empty ActivityRegistry.
 func NewActivityRegistry() *ActivityRegistry {
 	return &ActivityRegistry{
 		handlers: make(map[string]*activityHandlerWrapper),
 	}
 }
 
+// RegisterActivity registers a typed handler for the given activity in the registry.
 func RegisterActivity[I any, O any](
 	r *ActivityRegistry,
 	activity Activity[I, O],

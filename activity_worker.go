@@ -47,6 +47,7 @@ type ActivityRecord struct {
 	UpdatedAt          time.Time
 }
 
+// ToActivityRun converts the activity record into an ActivityRun suitable for handler execution.
 func (a *ActivityRecord) ToActivityRun(decoder Decoder) ActivityRun {
 	return NewActivityRun(a.ID, a.Input, decoder)
 }
@@ -77,6 +78,7 @@ func DefaultActivityWorkerConfig() *WorkerConfig {
 	}
 }
 
+// ActivityWorker polls storage for pending activities and dispatches them to registered handlers.
 type ActivityWorker struct {
 	storage  Storage
 	registry *ActivityRegistry
@@ -86,6 +88,7 @@ type ActivityWorker struct {
 	stopped chan struct{}
 }
 
+// NewActivityWorker creates a new ActivityWorker with the given storage, registry, and configuration.
 func NewActivityWorker(
 	storage Storage,
 	registry *ActivityRegistry,
@@ -103,6 +106,7 @@ func NewActivityWorker(
 	return worker
 }
 
+// Start launches the activity polling loop in the background.
 func (w *ActivityWorker) Start(ctx context.Context) {
 	// Start handler worker
 	w.wg.Go(func() {
@@ -113,6 +117,7 @@ func (w *ActivityWorker) Start(ctx context.Context) {
 	})
 }
 
+// Stop signals the worker to stop and waits until it finishes or the context expires.
 func (w *ActivityWorker) Stop(ctx context.Context) error {
 	close(w.stopped) // stop signal
 

@@ -16,11 +16,13 @@ func WithStorageQueueEncoder(encoder floww.Encoder) StorageOption {
 	}
 }
 
+// Storage is the default Postgres-based implementation.
 type Storage struct {
 	db      *pgxpool.Pool
 	encoder floww.Encoder
 }
 
+// NewStorage creates a new storage.
 func NewStorage(
 	db *pgxpool.Pool,
 	opts ...StorageOption,
@@ -37,6 +39,7 @@ func NewStorage(
 	return storage
 }
 
+// Decoder return a storage decoder.
 func (s *Storage) Decoder() floww.Decoder {
 	return s.encoder.Decode
 }

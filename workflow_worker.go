@@ -70,6 +70,7 @@ type WorkflowTaskRecord struct {
 	UpdatedAt   time.Time
 }
 
+// ToWorkflowRun converts the task record into a WorkflowRun suitable for handler execution.
 func (t *WorkflowTaskRecord) ToWorkflowRun(decoder Decoder) WorkflowRun {
 	return NewWorkflowRun(t.Workflow.ID, t.Workflow.Input, decoder)
 }
@@ -100,6 +101,7 @@ func DefaultWorkflowWorkerConfig() *WorkerConfig {
 	}
 }
 
+// WorkflowWorker polls storage for pending workflow tasks and dispatches them to registered handlers.
 type WorkflowWorker struct {
 	storage  Storage
 	registry *WorkflowRegistry
@@ -109,6 +111,7 @@ type WorkflowWorker struct {
 	stopped chan struct{}
 }
 
+// NewWorkflowWorker creates a new WorkflowWorker with the given storage, registry, and configuration.
 func NewWorkflowWorker(
 	storage Storage,
 	registry *WorkflowRegistry,
@@ -124,6 +127,7 @@ func NewWorkflowWorker(
 	}
 }
 
+// Start launches the workflow task polling loop in the background.
 func (w *WorkflowWorker) Start(ctx context.Context) {
 	// Start handler worker
 	w.wg.Go(func() {
@@ -134,6 +138,7 @@ func (w *WorkflowWorker) Start(ctx context.Context) {
 	})
 }
 
+// Stop signals the worker to stop and waits until it finishes or the context expires.
 func (w *WorkflowWorker) Stop(ctx context.Context) error {
 	close(w.stopped) // stop signal
 

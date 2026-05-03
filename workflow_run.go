@@ -2,6 +2,7 @@ package floww
 
 import "github.com/google/uuid"
 
+// WorkflowRun holds the execution context for a single workflow invocation.
 type WorkflowRun struct {
 	WorkflowID uuid.UUID
 
@@ -9,6 +10,7 @@ type WorkflowRun struct {
 	decoder       Decoder
 }
 
+// NewWorkflowRun constructs a WorkflowRun with the provided ID, raw input bytes, and decoder.
 func NewWorkflowRun(
 	workflowID uuid.UUID,
 	workflowInput []byte,
@@ -22,6 +24,7 @@ func NewWorkflowRun(
 	}
 }
 
+// IntoInput decodes the raw workflow input into v.
 func (r WorkflowRun) IntoInput(v any) error {
 	return r.decoder(r.workflowInput, v)
 }

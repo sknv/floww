@@ -9,12 +9,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrWorkflowSuspended is returned by a workflow handler when it is waiting for a pending activity to complete.
 var ErrWorkflowSuspended = errors.New("workflow suspended")
 
+// Workflow represents a named orchestration unit with typed input I.
 type Workflow[I any] struct {
 	Name string
 }
 
+// NewWorkflow creates a new Workflow with the given name.
 func NewWorkflow[I any](name string) Workflow[I] {
 	return Workflow[I]{
 		Name: name,
@@ -43,6 +46,7 @@ func (h *workflowHandlerWrapper) calculateBackoff(attempt uint, defaultBackoff t
 // WorkflowHandlerOption is a function to configure workflow handler options.
 type WorkflowHandlerOption func(*workflowHandlerWrapper)
 
+// WithWorkflowBackoffCalculator sets a custom backoff calculator for workflow task retries.
 func WithWorkflowBackoffCalculator(backoffCalculator BackoffCalculator) WorkflowHandlerOption {
 	return func(h *workflowHandlerWrapper) {
 		h.backoffCalculator = backoffCalculator
@@ -53,16 +57,19 @@ func WithWorkflowBackoffCalculator(backoffCalculator BackoffCalculator) Workflow
 // Workflow registry
 //
 
+// WorkflowRegistry holds registered workflow handlers keyed by workflow name.
 type WorkflowRegistry struct {
 	handlers map[string]*workflowHandlerWrapper
 }
 
+// NewWorkflowRegistry creates a new empty WorkflowRegistry.
 func NewWorkflowRegistry() *WorkflowRegistry {
 	return &WorkflowRegistry{
 		handlers: make(map[string]*workflowHandlerWrapper),
 	}
 }
 
+// RegisterWorkflow registers a typed handler for the given workflow in the registry.
 func RegisterWorkflow[I any](
 	r *WorkflowRegistry,
 	workflow Workflow[I],
@@ -190,6 +197,8 @@ func WithWorkflowScheduledAt(t time.Time) WorkflowOption {
 	}
 }
 
+// ExecuteWorkflowAsync enqueues a workflow for asynchronous execution.
+// The idempotencyKey prevents duplicate submissions for the same logical request.
 func ExecuteWorkflowAsync[I any](
 	ctx context.Context,
 	storage Storage,

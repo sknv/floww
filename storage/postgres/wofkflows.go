@@ -11,6 +11,9 @@ import (
 	"github.com/sknv/floww"
 )
 
+// InsertWorkflow creates a new workflow and schedules its first workflow task.
+// The workflow insert and task creation are executed in a single transaction.
+// If a workflow with the same idempotency key already exists, the insert is ignored.
 func (s *Storage) InsertWorkflow(
 	ctx context.Context,
 	txer floww.TxBeginner,
@@ -50,6 +53,14 @@ func (s *Storage) InsertWorkflow(
 	return nil
 }
 
+// insertWorkflow inserts a workflow record into storage.
+//
+// It encodes the input payload (if provided) and persists execution parameters.
+//
+// IMPORTANT:
+// - Intended to be called inside a transaction together with task creation.
+// - Uses idempotency key to guarantee safe retries (ON CONFLICT DO NOTHING).
+// - Does not verify whether the insert actually happened (caller may rely on idempotency).
 func (s *Storage) insertWorkflow(
 	ctx context.Context,
 	execer floww.Execer,
@@ -109,10 +120,17 @@ type historyEventRecord struct {
 	ActivityOutput         []byte
 }
 
+// ToHistoryEvent converts a raw DB record into a domain HistoryEvent.
+//
+// IMPORTANT:
+// - Decoding is deferred to the provided decoder to allow custom serialization formats.
+// - Assumes ActivityOutput is encoded with the same encoder/decoder pair.
 func (e historyEventRecord) ToHistoryEvent(decoder floww.Decoder) floww.HistoryEvent {
 	return floww.NewHistoryEvent(e.ActivityIdempotencyKey, e.ActivityOutput, decoder)
 }
 
+// ListHistoryEventsForWorkflow returns all completed activity outputs for a workflow,
+// mapped by activity idempotency key. Results are ordered by activity ID.
 func (s *Storage) ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID) (floww.HistoryEvents, error) {
 	const sql = `
 		SELECT idempotency_key, output
@@ -151,6 +169,8 @@ func (s *Storage) ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID
 	return historyEvents, nil
 }
 
+// CompleteWorkflow marks the workflow as completed and clears any error message.
+// Returns an error if the workflow does not exist.
 func (s *Storage) CompleteWorkflow(ctx context.Context, id uuid.UUID) error {
 	const sql = `
 		UPDATE floww_workflows
@@ -172,6 +192,14 @@ func (s *Storage) CompleteWorkflow(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// failWorkflow marks a workflow as failed.
+//
+// It updates the workflow status, sets the error message, and records completion time.
+//
+// IMPORTANT:
+// - Must be called within a transaction when coupled with task/activity failure.
+// - Does not enforce state transitions.
+// - Returns an error if the workflow does not exist.
 func (s *Storage) failWorkflow(
 	ctx context.Context,
 	execer floww.Execer,
@@ -198,15 +226,26 @@ func (s *Storage) failWorkflow(
 	return nil
 }
 
+// DeleteColdWorkflows deletes completed workflows older than the provided cutoff date.
+// The number of deleted records is limited by the given limit.
 func (s *Storage) DeleteColdWorkflows(ctx context.Context, cutoffDate time.Time, limit uint) (uint, error) {
 	return s.deleteWorkflows(ctx, floww.WorkflowStatusCompleted, cutoffDate, limit)
 }
 
+// DeleteDeadWorkflows deletes failed workflows older than the provided cutoff date.
+// The number of deleted records is limited by the given limit.
 func (s *Storage) DeleteDeadWorkflows(ctx context.Context, cutoffDate time.Time, limit uint) (uint, error) {
 	return s.deleteWorkflows(ctx, floww.WorkflowStatusFailed, cutoffDate, limit)
 }
 
-// deleteWorkflows removes workflows by status.
+// deleteWorkflows deletes workflows with the given status older than cutoffDate.
+//
+// It deletes up to 'limit' records using a subquery to avoid long-running full-table deletes.
+//
+// IMPORTANT:
+// - Not transactional across batches; caller should loop if full cleanup is needed.
+// - Uses LIMIT inside subquery for controlled batch deletion.
+// - Returns number of rows actually deleted.
 func (s *Storage) deleteWorkflows(
 	ctx context.Context,
 	status floww.WorkflowStatus,

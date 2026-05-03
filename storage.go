@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 )
 
+// Storage defines the persistence contract required by workflow and activity workers.
+//
 //nolint:interfacebloat // single unit
 type Storage interface {
 	InsertWorkflow(
@@ -71,4 +73,5 @@ type Storage interface {
 	Decoder() Decoder
 }
 
+// Decoder is a function that deserialises raw bytes into a typed value.
 type Decoder func(data []byte, v any) error

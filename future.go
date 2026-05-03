@@ -6,10 +6,13 @@ import (
 	"github.com/samber/mo"
 )
 
+// Future represents the pending result of an asynchronous activity execution.
 type Future[O any] struct {
 	event mo.Option[HistoryEvent]
 }
 
+// Get returns the activity output, or ErrWorkflowSuspended if the activity has not yet completed.
+//
 //nolint:ireturn // returns a generic result
 func (f Future[O]) Get() (O, error) {
 	var out O
