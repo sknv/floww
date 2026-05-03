@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Activity represents a named unit of work with typed input I and output O.
@@ -16,6 +18,11 @@ func NewActivity[I any, O any](name string) Activity[I, O] {
 	return Activity[I, O]{
 		Name: name,
 	}
+}
+
+// IdempotencyKey provides predictive idempotency key for the provided workflow id.
+func (a Activity[I, O]) IdempotencyKey(workflowID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(workflowID, []byte(a.Name))
 }
 
 //

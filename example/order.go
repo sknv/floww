@@ -36,14 +36,9 @@ type (
 	}
 )
 
-const (
-	chargeCardActivityName = "ChargeCard"
-	sendEmailActivityName  = "SendEmail"
-)
-
 var (
-	ChargeCardActivity = floww.NewActivity[ChargeInput, ChargeOutput](chargeCardActivityName)
-	SendEmailActivity  = floww.NewActivity[EmailInput, EmailOutput](sendEmailActivityName)
+	ChargeCardActivity = floww.NewActivity[ChargeInput, ChargeOutput]("ChargeCard")
+	SendEmailActivity  = floww.NewActivity[EmailInput, EmailOutput]("SendEmail")
 )
 
 //
@@ -55,9 +50,7 @@ type OrderInput struct {
 	Amount int
 }
 
-const orderWorkflowName = "OrderWorkflow"
-
-var OrderWorkflow = floww.NewWorkflow[OrderInput](orderWorkflowName)
+var OrderWorkflow = floww.NewWorkflow[OrderInput]("OrderWorkflow")
 
 // RegisterWorkflow registers activities and workflows in the corresponding registries.
 func RegisterWorkflow(activityRegistry *floww.ActivityRegistry, workflowRegistry *floww.WorkflowRegistry) {
@@ -85,7 +78,7 @@ func EnqueueOrderWorkflow(ctx context.Context, storage floww.Storage, txer floww
 		return err
 	}
 
-	fmt.Println("Workflow", orderWorkflowName, "is scheduled successfully")
+	fmt.Println("Order workflow is scheduled successfully")
 
 	return nil
 }
@@ -98,7 +91,6 @@ func RunOrderWorkflow(ctx *floww.WorkflowContext, in OrderInput) error {
 	charged, err := floww.ExecuteActivity(
 		ctx,
 		ChargeCardActivity,
-		activityIdempotencyKey(ctx.WorkflowID(), chargeCardActivityName),
 		ChargeInput{
 			UserID: in.UserID,
 			Amount: in.Amount,
@@ -123,7 +115,6 @@ func RunOrderWorkflow(ctx *floww.WorkflowContext, in OrderInput) error {
 	_, err = floww.ExecuteActivity(
 		ctx,
 		SendEmailActivity,
-		activityIdempotencyKey(ctx.WorkflowID(), sendEmailActivityName),
 		EmailInput{
 			UserID:        in.UserID,
 			ChargedAmount: charged.ChargedAmount,
@@ -175,9 +166,4 @@ func SendEmail(ctx context.Context, in EmailInput) (EmailOutput, error) {
 
 func calculateBackoff(attempt uint) time.Duration {
 	return time.Minute * time.Duration(attempt)
-}
-
-// activityIdempotencyKey provides predictive idempotency key for activity for provided workflow and activity name.
-func activityIdempotencyKey(workflowID uuid.UUID, activityName string) uuid.UUID {
-	return uuid.NewSHA1(workflowID, []byte(activityName))
 }

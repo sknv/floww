@@ -46,10 +46,11 @@ func (c *WorkflowContext) WorkflowID() uuid.UUID {
 func ExecuteActivityAsync[I any, O any](
 	ctx *WorkflowContext,
 	activity Activity[I, O],
-	idempotencyKey uuid.UUID,
 	input I,
 	opts ...ActivityOption,
 ) (Future[O], error) {
+	idempotencyKey := activity.IdempotencyKey(ctx.WorkflowID())
+
 	if event, ok := ctx.history[idempotencyKey]; ok {
 		return Future[O]{
 			event: mo.Some(event),
@@ -81,11 +82,10 @@ func ExecuteActivityAsync[I any, O any](
 func ExecuteActivity[I any, O any](
 	ctx *WorkflowContext,
 	activity Activity[I, O],
-	idempotencyKey uuid.UUID,
 	input I,
 	opts ...ActivityOption,
 ) (O, error) {
-	out, err := ExecuteActivityAsync(ctx, activity, idempotencyKey, input, opts...)
+	out, err := ExecuteActivityAsync(ctx, activity, input, opts...)
 	if err != nil {
 		var zero O
 
