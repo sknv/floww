@@ -73,6 +73,7 @@ CREATE TYPE floww_workflow_task_status AS ENUM (
 CREATE TABLE IF NOT EXISTS floww_workflow_tasks (
   id                   uuid                       PRIMARY KEY DEFAULT uuidv7(),
   workflow_id          uuid                       NOT NULL REFERENCES floww_workflows (id) ON DELETE CASCADE,
+  name                 text                       NOT NULL,
   status               floww_workflow_task_status NOT NULL DEFAULT 'pending',
   priority             int                        NOT NULL DEFAULT 0,
   stuck_timeout_millis bigint                     NOT NULL,
@@ -85,6 +86,7 @@ CREATE TABLE IF NOT EXISTS floww_workflow_tasks (
 );
 
 COMMENT ON TABLE floww_workflow_tasks IS 'Задачи для возобновления рабочих процессов';
+COMMENT ON COLUMN floww_workflow_tasks.name IS 'Имя процесса';
 COMMENT ON COLUMN floww_workflow_tasks.priority IS 'Приоритет выполнения: чем больше, тем выше приоритет';
 COMMENT ON COLUMN floww_workflow_tasks.stuck_timeout_millis IS 'Промежуток времени в миллисекундах, после которого процесс считается зависшим';
 COMMENT ON COLUMN floww_workflow_tasks.scheduled_at IS 'Время, в которое запланирован запуск задачи';
@@ -98,14 +100,24 @@ BEFORE UPDATE ON floww_workflow_tasks
 FOR EACH ROW
 EXECUTE FUNCTION floww_set_updated_at();
 
--- Основной индекс для получения задач на выполнение
+-- Основные индексы для получения задач на выполнение
 CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__pending_worker
 ON floww_workflow_tasks (priority DESC, scheduled_at)
 WHERE status = 'pending';
 
--- Индекс для получения зависших задач
+-- Пропустите этот индекс, если не нужна выборка по конкретным процессам
+CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__pending_name_worker
+ON floww_workflow_tasks (name, priority DESC, scheduled_at)
+WHERE status = 'pending';
+
+-- Индексы для получения зависших задач
 CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__stuck_worker
 ON floww_workflow_tasks (stuck_at)
+WHERE status = 'running';
+
+-- Пропустите этот индекс, если не нужна выборка по конкретным процессам
+CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__stuck_name_worker
+ON floww_workflow_tasks (name, stuck_at)
 WHERE status = 'running';
 
 -- Индекс для поиска по внешнему ключу
@@ -162,14 +174,24 @@ BEFORE UPDATE ON floww_activities
 FOR EACH ROW
 EXECUTE FUNCTION floww_set_updated_at();
 
--- Основной индекс для получения задач на выполнение
+-- Основные индексы для получения задач на выполнение
 CREATE INDEX IF NOT EXISTS idx__floww_activities__pending_worker
 ON floww_activities (priority DESC, scheduled_at)
 WHERE status = 'pending';
 
--- Индекс для получения зависших задач
+-- Пропустите этот индекс, если не нужна выборка по конкретным активностям
+CREATE INDEX IF NOT EXISTS idx__floww_activities__pending_name_worker
+ON floww_activities (name, priority DESC, scheduled_at)
+WHERE status = 'pending';
+
+-- Индексы для получения зависших задач
 CREATE INDEX IF NOT EXISTS idx__floww_activities__stuck_worker
 ON floww_activities (stuck_at)
+WHERE status = 'running';
+
+-- Пропустите этот индекс, если не нужна выборка по конкретным активностям
+CREATE INDEX IF NOT EXISTS idx__floww_activities__stuck_name_worker
+ON floww_activities (name, stuck_at)
 WHERE status = 'running';
 
 -- Индекс для поиска по внешнему ключу

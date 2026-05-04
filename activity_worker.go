@@ -107,13 +107,14 @@ func NewActivityWorker(
 }
 
 // Start launches the activity polling loop in the background.
-func (w *ActivityWorker) Start(ctx context.Context) {
+// If optional activities argument provided worker will process only specified activities.
+func (w *ActivityWorker) Start(ctx context.Context, activities ...string) {
 	// Start handler worker
 	w.wg.Go(func() {
 		// Unlink original context cancellation to gracefully stop the worker later
 		workerCtx := context.WithoutCancel(ctx)
 
-		w.runHandlerWorker(workerCtx)
+		w.runHandlerWorker(workerCtx, activities)
 	})
 }
 
@@ -138,7 +139,8 @@ func (w *ActivityWorker) Stop(ctx context.Context) error {
 	}
 }
 
-func (w *ActivityWorker) runHandlerWorker(ctx context.Context) {
+// runHandlerWorker starts a worker to process the activities for the specified names.
+func (w *ActivityWorker) runHandlerWorker(ctx context.Context, activities []string) {
 	ticker := time.NewTicker(w.config.Poll.PollInterval)
 	defer ticker.Stop()
 
@@ -152,7 +154,7 @@ func (w *ActivityWorker) runHandlerWorker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			for {
-				fetched := w.processActivities(ctx)
+				fetched := w.processActivities(ctx, activities)
 				if fetched == 0 {
 					break // no more tasks, wait for the next timer tick
 				}
@@ -169,9 +171,11 @@ func (w *ActivityWorker) runHandlerWorker(ctx context.Context) {
 	}
 }
 
-func (w *ActivityWorker) processActivities(ctx context.Context) int {
+// processActivities fetches batch of activities for the specified names from db and routes them to handlers.
+// Returns total count of fetched activities.
+func (w *ActivityWorker) processActivities(ctx context.Context, activities []string) int {
 	// Fetch activities from db first
-	activities, err := w.fetchActivities(ctx)
+	tasks, err := w.fetchActivities(ctx, activities)
 	if err != nil {
 		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch activities",
 			slog.String("component", "floww"),
@@ -181,7 +185,7 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 		return 0
 	}
 
-	if len(activities) == 0 {
+	if len(tasks) == 0 {
 		return 0
 	}
 
@@ -189,9 +193,9 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 	gr := errgroup.Group{}
 	gr.SetLimit(w.config.Poll.Concurrency)
 
-	for i := range activities {
+	for i := range tasks {
 		gr.Go(func() error {
-			activity := &activities[i]
+			activity := &tasks[i]
 
 			if actErr := w.handleActivity(ctx, activity); actErr != nil {
 				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle an activity",
@@ -214,20 +218,20 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 		return 0
 	}
 
-	return len(activities)
+	return len(tasks)
 }
 
-// fetchActivities fetches batch of activities from db.
-func (w *ActivityWorker) fetchActivities(ctx context.Context) ([]ActivityRecord, error) {
+// fetchActivities fetches batch of activities from db for the specified activities.
+func (w *ActivityWorker) fetchActivities(ctx context.Context, activities []string) ([]ActivityRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
 
-	activities, err := w.storage.ListActiveActivities(ctx, w.config.Poll.BatchSize)
+	tasks, err := w.storage.ListActiveActivities(ctx, activities, w.config.Poll.BatchSize)
 	if err != nil {
-		return nil, fmt.Errorf("list activities from storage: %w", err)
+		return nil, fmt.Errorf("list active activities from storage: %w", err)
 	}
 
-	return activities, nil
+	return tasks, nil
 }
 
 // handleActivity processes the provided activity by handing it to the corresponding handler
@@ -299,6 +303,7 @@ func (w *ActivityWorker) handleActivityError(
 	return nil
 }
 
+// failJob immediately fails an activity moving it to the dead letter queue.
 func (w *ActivityWorker) failActivity(ctx context.Context, activity *ActivityRecord, err error) error {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()

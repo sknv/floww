@@ -34,7 +34,7 @@ type Storage interface {
 		input any,
 		options ActivityOptions,
 	) error
-	ListActiveActivities(ctx context.Context, batchSize uint) ([]ActivityRecord, error)
+	ListActiveActivities(ctx context.Context, activities []string, batchSize uint) ([]ActivityRecord, error)
 	CompleteActivity(
 		ctx context.Context,
 		activityID uuid.UUID,
@@ -54,7 +54,7 @@ type Storage interface {
 		errorMessage string,
 	) error
 
-	ListActiveWorkflowTasks(ctx context.Context, batchSize uint) ([]WorkflowTaskRecord, error)
+	ListActiveWorkflowTasks(ctx context.Context, workflows []string, batchSize uint) ([]WorkflowTaskRecord, error)
 	CompleteWorkflowTask(ctx context.Context, workflowTaskID uuid.UUID, workflowID uuid.UUID) error
 	ReScheduleWorkflowTask(
 		ctx context.Context,
