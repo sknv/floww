@@ -100,24 +100,14 @@ BEFORE UPDATE ON floww_workflow_tasks
 FOR EACH ROW
 EXECUTE FUNCTION floww_set_updated_at();
 
--- Основные индексы для получения задач на выполнение
+-- Основной индекс для получения задач на выполнение
 CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__pending_worker
 ON floww_workflow_tasks (priority DESC, scheduled_at)
 WHERE status = 'pending';
 
--- Пропустите этот индекс, если не нужна выборка по конкретным процессам
-CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__pending_name_worker
-ON floww_workflow_tasks (name, priority DESC, scheduled_at)
-WHERE status = 'pending';
-
--- Индексы для получения зависших задач
+-- Индекс для получения зависших задач
 CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__stuck_worker
 ON floww_workflow_tasks (stuck_at)
-WHERE status = 'running';
-
--- Пропустите этот индекс, если не нужна выборка по конкретным процессам
-CREATE INDEX IF NOT EXISTS idx__floww_workflow_tasks__stuck_name_worker
-ON floww_workflow_tasks (name, stuck_at)
 WHERE status = 'running';
 
 -- Индекс для поиска по внешнему ключу
@@ -174,24 +164,14 @@ BEFORE UPDATE ON floww_activities
 FOR EACH ROW
 EXECUTE FUNCTION floww_set_updated_at();
 
--- Основные индексы для получения задач на выполнение
+-- Основной индекс для получения задач на выполнение
 CREATE INDEX IF NOT EXISTS idx__floww_activities__pending_worker
 ON floww_activities (priority DESC, scheduled_at)
 WHERE status = 'pending';
 
--- Пропустите этот индекс, если не нужна выборка по конкретным активностям
-CREATE INDEX IF NOT EXISTS idx__floww_activities__pending_name_worker
-ON floww_activities (name, priority DESC, scheduled_at)
-WHERE status = 'pending';
-
--- Индексы для получения зависших задач
+-- Индекс для получения зависших задач
 CREATE INDEX IF NOT EXISTS idx__floww_activities__stuck_worker
 ON floww_activities (stuck_at)
-WHERE status = 'running';
-
--- Пропустите этот индекс, если не нужна выборка по конкретным активностям
-CREATE INDEX IF NOT EXISTS idx__floww_activities__stuck_name_worker
-ON floww_activities (name, stuck_at)
 WHERE status = 'running';
 
 -- Индекс для поиска по внешнему ключу

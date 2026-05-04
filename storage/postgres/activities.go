@@ -132,7 +132,7 @@ const _fetchActivitiesWithNamesSQL = `
 	    SELECT id, priority, scheduled_at
 	    FROM floww_activities
 	    WHERE name = ANY($1)
-		  AND status = $2
+	      AND status = $2
 	      AND scheduled_at <= now()
 	    ORDER BY priority DESC, scheduled_at
 	    LIMIT $4
@@ -142,7 +142,7 @@ const _fetchActivitiesWithNamesSQL = `
 	    SELECT id, priority, scheduled_at
 	    FROM floww_activities
 	    WHERE name = ANY($1)
-		  AND status = $3
+	      AND status = $3
 	      AND stuck_at <= now()
 	    ORDER BY priority DESC, scheduled_at
 	    LIMIT $4
