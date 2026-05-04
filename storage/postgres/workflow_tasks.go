@@ -31,6 +31,7 @@ func (s *Storage) insertWorkflowTask(
 		INSERT INTO floww_workflow_tasks (
 		  id,
 		  workflow_id,
+		  name,
 		  priority,
 		  stuck_timeout_millis,
 		  scheduled_at
@@ -38,6 +39,7 @@ func (s *Storage) insertWorkflowTask(
 		SELECT
 		  $1,
 		  w.id,
+		  w.name,
 		  w.priority,
 		  w.stuck_timeout_millis,
 		  $3
@@ -94,15 +96,92 @@ const _fetchWorkflowTasksSQL = `
 	      stuck_at = now() + (stuck_timeout_millis * interval '1 millisecond')
 	  FROM candidates
 	  WHERE t.id = candidates.id
-	  RETURNING t.id,
-	            t.workflow_id,
-	            t.status,
-	            t.scheduled_at,
-	            t.run_at,
-	            t.stuck_at,
-	            t.completed_at,
-	            t.created_at,
-	            t.updated_at
+	  RETURNING
+	    t.id,
+	    t.workflow_id,
+	    t.status,
+	    t.scheduled_at,
+	    t.run_at,
+	    t.stuck_at,
+	    t.completed_at,
+	    t.created_at,
+	    t.updated_at
+	)
+
+	SELECT
+	  ut.id AS task_id,
+	  ut.status AS task_status,
+	  ut.scheduled_at AS task_scheduled_at,
+	  ut.run_at AS task_run_at,
+	  ut.stuck_at AS task_stuck_at,
+	  ut.completed_at AS task_completed_at,
+	  ut.created_at AS task_created_at,
+	  ut.updated_at AS task_updated_at,
+
+	  w.id AS workflow_id,
+	  w.idempotency_key AS workflow_idempotency_key,
+	  w.name AS workflow_name,
+	  w.status AS workflow_status,
+	  w.input AS workflow_input,
+	  w.output AS workflow_output,
+	  w.priority AS workflow_priority,
+	  w.attempts AS workflow_attempts,
+	  w.max_attempts AS workflow_max_attempts,
+	  w.stuck_timeout_millis AS workflow_stuck_timeout_millis,
+	  w.completed_at AS workflow_completed_at,
+	  w.error_message AS workflow_error_message,
+	  w.created_at AS workflow_created_at,
+	  w.updated_at AS workflow_updated_at
+	FROM updated_tasks AS ut
+	  JOIN floww_workflows AS w ON w.id = ut.workflow_id
+`
+
+const _fetchWorkflowTasksWithNamesSQL = `
+	WITH pre_candidates AS (
+	  (
+	    SELECT id, priority, scheduled_at
+	    FROM floww_workflow_tasks
+	    WHERE name = ANY($1)
+		  AND status = $2
+	      AND scheduled_at <= now()
+	    ORDER BY priority DESC, scheduled_at
+	    LIMIT $4
+	  )
+	  UNION ALL
+	  (
+	    SELECT id, priority, scheduled_at
+	    FROM floww_workflow_tasks
+	    WHERE name = ANY($1)
+		  AND status = $3
+	      AND stuck_at <= now()
+	    ORDER BY priority DESC, scheduled_at
+	    LIMIT $4
+	  )
+	),
+	candidates AS (
+	  SELECT id
+	  FROM pre_candidates
+	  ORDER BY priority DESC, scheduled_at
+	  LIMIT $4
+	  FOR NO KEY UPDATE SKIP LOCKED
+	),
+	updated_tasks AS (
+	  UPDATE floww_workflow_tasks AS t
+	  SET status = $3,
+	      run_at = now(),
+	      stuck_at = now() + (stuck_timeout_millis * interval '1 millisecond')
+	  FROM candidates
+	  WHERE t.id = candidates.id
+	  RETURNING
+	    t.id,
+	    t.workflow_id,
+	    t.status,
+	    t.scheduled_at,
+	    t.run_at,
+	    t.stuck_at,
+	    t.completed_at,
+	    t.created_at,
+	    t.updated_at
 	)
 
 	SELECT
@@ -136,10 +215,35 @@ const _fetchWorkflowTasksSQL = `
 // ListActiveWorkflowTasks fetches a batch of workflow tasks ready for execution.
 // It selects pending or stuck tasks, locks them, marks them as running,
 // and returns both task and associated workflow data.
-func (s *Storage) ListActiveWorkflowTasks(ctx context.Context, batchSize uint) ([]floww.WorkflowTaskRecord, error) {
-	rows, err := s.db.Query(
-		ctx, _fetchWorkflowTasksSQL, floww.WorkflowTaskStatusPending, floww.WorkflowTaskStatusRunning, batchSize,
+// If no workflows specified tasks for all workflows will be fetched.
+//
+//nolint:funlen // linear logic
+func (s *Storage) ListActiveWorkflowTasks(
+	ctx context.Context, workflows []string, batchSize uint,
+) ([]floww.WorkflowTaskRecord, error) {
+	var (
+		sql  string
+		args []any
 	)
+
+	if len(workflows) > 0 {
+		sql = _fetchWorkflowTasksWithNamesSQL
+		args = []any{
+			workflows,
+			floww.WorkflowTaskStatusPending,
+			floww.WorkflowTaskStatusRunning,
+			batchSize,
+		}
+	} else {
+		sql = _fetchWorkflowTasksSQL
+		args = []any{
+			floww.WorkflowTaskStatusPending,
+			floww.WorkflowTaskStatusRunning,
+			batchSize,
+		}
+	}
+
+	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query workflow tasks: %w", err)
 	}

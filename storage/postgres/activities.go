@@ -105,43 +105,123 @@ const _fetchActivitiesSQL = `
 	    stuck_at = now() + (stuck_timeout_millis * interval '1 millisecond')
 	FROM candidates
 	WHERE a.id = candidates.id
-	RETURNING a.id,
-	          a.idempotency_key,
-	          a.workflow_id,
-	          a.name,
-	          a.status,
-	          a.input,
-	          a.output,
-	          a.priority,
-	          a.attempts,
-	          a.max_attempts,
-	          a.stuck_timeout_millis,
-	          a.scheduled_at,
-	          a.run_at,
-	          a.stuck_at,
-	          a.completed_at,
-	          a.error_message,
-	          a.created_at,
-	          a.updated_at
+	RETURNING
+	  a.id,
+	  a.idempotency_key,
+	  a.workflow_id,
+	  a.name,
+	  a.status,
+	  a.input,
+	  a.output,
+	  a.priority,
+	  a.attempts,
+	  a.max_attempts,
+	  a.stuck_timeout_millis,
+	  a.scheduled_at,
+	  a.run_at,
+	  a.stuck_at,
+	  a.completed_at,
+	  a.error_message,
+	  a.created_at,
+	  a.updated_at
+`
+
+const _fetchActivitiesWithNamesSQL = `
+	WITH pre_candidates AS (
+	  (
+	    SELECT id, priority, scheduled_at
+	    FROM floww_activities
+	    WHERE name = ANY($1)
+		  AND status = $2
+	      AND scheduled_at <= now()
+	    ORDER BY priority DESC, scheduled_at
+	    LIMIT $4
+	  )
+	  UNION ALL
+	  (
+	    SELECT id, priority, scheduled_at
+	    FROM floww_activities
+	    WHERE name = ANY($1)
+		  AND status = $3
+	      AND stuck_at <= now()
+	    ORDER BY priority DESC, scheduled_at
+	    LIMIT $4
+	  )
+	),
+	candidates AS (
+	  SELECT id
+	  FROM pre_candidates
+	  ORDER BY priority DESC, scheduled_at
+	  LIMIT $4
+	  FOR NO KEY UPDATE SKIP LOCKED
+	)
+
+	UPDATE floww_activities AS a
+	SET status = $3,
+	    attempts = attempts + 1,
+	    run_at = now(),
+	    stuck_at = now() + (stuck_timeout_millis * interval '1 millisecond')
+	FROM candidates
+	WHERE a.id = candidates.id
+	RETURNING
+	  a.id,
+	  a.idempotency_key,
+	  a.workflow_id,
+	  a.name,
+	  a.status,
+	  a.input,
+	  a.output,
+	  a.priority,
+	  a.attempts,
+	  a.max_attempts,
+	  a.stuck_timeout_millis,
+	  a.scheduled_at,
+	  a.run_at,
+	  a.stuck_at,
+	  a.completed_at,
+	  a.error_message,
+	  a.created_at,
+	  a.updated_at
 `
 
 // ListActiveActivities fetches a batch of activities that are ready to run.
 // It selects pending or stuck activities, locks them, marks them as running,
 // increments attempt counters, and returns the updated records.
-func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]floww.ActivityRecord, error) {
-	rows, err := s.db.Query(
-		ctx,
-		_fetchActivitiesSQL,
-		floww.ActivityStatusPending,
-		floww.ActivityStatusRunning,
-		batchSize,
+// If no activities specified tasks for all activities will be fetched.
+//
+//nolint:funlen // linear logic
+func (s *Storage) ListActiveActivities(
+	ctx context.Context, activities []string, batchSize uint,
+) ([]floww.ActivityRecord, error) {
+	var (
+		sql  string
+		args []any
 	)
+
+	if len(activities) > 0 {
+		sql = _fetchActivitiesWithNamesSQL
+		args = []any{
+			activities,
+			floww.ActivityStatusPending,
+			floww.ActivityStatusRunning,
+			batchSize,
+		}
+	} else {
+		sql = _fetchActivitiesSQL
+		args = []any{
+			floww.ActivityStatusPending,
+			floww.ActivityStatusRunning,
+			batchSize,
+		}
+	}
+
+	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query activities: %w", err)
 	}
 	defer rows.Close()
 
-	activities := make([]floww.ActivityRecord, 0, batchSize)
+	tasks := make([]floww.ActivityRecord, 0, batchSize)
 
 	for rows.Next() {
 		var activity floww.ActivityRecord
@@ -170,14 +250,14 @@ func (s *Storage) ListActiveActivities(ctx context.Context, batchSize uint) ([]f
 			return nil, fmt.Errorf("scan activity: %w", err)
 		}
 
-		activities = append(activities, activity)
+		tasks = append(tasks, activity)
 	}
 
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate over activities: %w", err)
 	}
 
-	return activities, nil
+	return tasks, nil
 }
 
 // CompleteActivity marks the activity as completed and schedules the next workflow task.

@@ -3,7 +3,7 @@ package floww
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -32,7 +32,7 @@ type WorkflowRecord struct {
 	Name               string
 	Status             WorkflowStatus
 	Input              []byte
-	Output             []byte
+	Output             []byte // unused for now
 	Priority           int
 	Attempts           uint
 	MaxAttempts        uint
@@ -128,13 +128,14 @@ func NewWorkflowWorker(
 }
 
 // Start launches the workflow task polling loop in the background.
-func (w *WorkflowWorker) Start(ctx context.Context) {
+// If optional workflows argument provided worker will process only specified workflows.
+func (w *WorkflowWorker) Start(ctx context.Context, workflows ...string) {
 	// Start handler worker
 	w.wg.Go(func() {
 		// Unlink original context cancellation to gracefully stop the worker later
 		workerCtx := context.WithoutCancel(ctx)
 
-		w.runHandlerWorker(workerCtx)
+		w.runHandlerWorker(workerCtx, workflows)
 	})
 }
 
@@ -159,7 +160,8 @@ func (w *WorkflowWorker) Stop(ctx context.Context) error {
 	}
 }
 
-func (w *WorkflowWorker) runHandlerWorker(ctx context.Context) {
+// runHandlerWorker starts a worker to process the workflows for the specified names.
+func (w *WorkflowWorker) runHandlerWorker(ctx context.Context, workflows []string) {
 	ticker := time.NewTicker(w.config.Poll.PollInterval)
 	defer ticker.Stop()
 
@@ -173,7 +175,7 @@ func (w *WorkflowWorker) runHandlerWorker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			for {
-				fetched := w.processWorkflowTasks(ctx)
+				fetched := w.processWorkflowTasks(ctx, workflows)
 				if fetched == 0 {
 					break // no more tasks, wait for the next timer tick
 				}
@@ -190,11 +192,16 @@ func (w *WorkflowWorker) runHandlerWorker(ctx context.Context) {
 	}
 }
 
-func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
+// processWorkflowTasks fetches batch of workflows for the specified names from db and routes them to handlers.
+// Returns total count of fetched workflows.
+func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context, workflows []string) int {
 	// Fetch tasks from db first
-	tasks, err := w.fetchWorkflowTasks(ctx)
+	tasks, err := w.fetchWorkflowTasks(ctx, workflows)
 	if err != nil {
-		log.Printf("[Floww][ERROR] Failed to fetch tasks: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch workflow tasks",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -212,7 +219,11 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 			task := &tasks[i]
 
 			if taskErr := w.handleWorkflowTask(ctx, task); taskErr != nil {
-				log.Printf("[Floww][ERROR] Failed to handle task with id '%s': %v", task.ID, taskErr)
+				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle a task",
+					slog.String("component", "floww"),
+					slog.String("task_id", task.ID.String()),
+					slog.String("error", taskErr.Error()),
+				)
 			}
 
 			return nil
@@ -220,7 +231,10 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 	}
 
 	if err = gr.Wait(); err != nil {
-		log.Printf("[Floww][ERROR] Failed to wait for all tasks to complete: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to wait for all tasks to complete",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -228,12 +242,12 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 	return len(tasks)
 }
 
-// fetchWorkflowTasks fetches batch of tasks from db.
-func (w *WorkflowWorker) fetchWorkflowTasks(ctx context.Context) ([]WorkflowTaskRecord, error) {
+// fetchWorkflowTasks fetches batch of tasks from db for the specified workflows.
+func (w *WorkflowWorker) fetchWorkflowTasks(ctx context.Context, workflows []string) ([]WorkflowTaskRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
 
-	tasks, err := w.storage.ListActiveWorkflowTasks(ctx, w.config.Poll.BatchSize)
+	tasks, err := w.storage.ListActiveWorkflowTasks(ctx, workflows, w.config.Poll.BatchSize)
 	if err != nil {
 		return nil, fmt.Errorf("list active workflow tasks from storage: %w", err)
 	}
@@ -246,9 +260,10 @@ func (w *WorkflowWorker) fetchWorkflowTasks(ctx context.Context) ([]WorkflowTask
 func (w *WorkflowWorker) handleWorkflowTask(ctx context.Context, task *WorkflowTaskRecord) error {
 	handler, exists := w.registry.handlers[task.Workflow.Name]
 	if !exists {
-		log.Printf(
-			"[Floww][ERROR] No handler registered for workflow '%s', task '%s' will be rescheduled",
-			task.Workflow.Name, task.ID,
+		slog.LogAttrs(ctx, slog.LevelError, "No handler registered for the workflow, a task will be rescheduled",
+			slog.String("component", "floww"),
+			slog.String("workflow", task.Workflow.Name),
+			slog.String("task_id", task.ID.String()),
 		)
 
 		return w.handleWorkflowTaskError(
@@ -308,6 +323,7 @@ func (w *WorkflowWorker) handleWorkflowTaskError(
 	return nil
 }
 
+// failJob immediately fails a workflow task moving it to the dead letter queue.
 func (w *WorkflowWorker) failWorkflowTask(ctx context.Context, task *WorkflowTaskRecord, err error) error {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
@@ -330,7 +346,9 @@ func (w *WorkflowWorker) CleanColdWorkflows(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Running cold workflows cleaner...")
+	slog.LogAttrs(ctx, slog.LevelInfo, "Running cold workflows cleaner...",
+		slog.String("component", "floww"),
+	)
 
 	ctx, cancel := context.WithTimeout(ctx, w.config.ColdCleanup.DbTimeout)
 	defer cancel()
@@ -343,12 +361,17 @@ func (w *WorkflowWorker) CleanColdWorkflows(ctx context.Context) error {
 	}
 
 	if rowsAffected == 0 {
-		log.Printf("[Floww][INFO] No cold workflows to be cleaned up")
+		slog.LogAttrs(ctx, slog.LevelInfo, "No cold workflows to be cleaned up",
+			slog.String("component", "floww"),
+		)
 
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Cleaned up %d cold workflows", rowsAffected)
+	slog.LogAttrs(ctx, slog.LevelInfo, "Cold workflows cleaned up successfully",
+		slog.String("component", "floww"),
+		slog.Uint64("deleted_workflow_count", uint64(rowsAffected)),
+	)
 
 	return nil
 }
@@ -362,7 +385,9 @@ func (w *WorkflowWorker) CleanDeadWorkflows(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Running dead workflows cleaner...")
+	slog.LogAttrs(ctx, slog.LevelInfo, "Running dead workflows cleaner...",
+		slog.String("component", "floww"),
+	)
 
 	ctx, cancel := context.WithTimeout(ctx, w.config.DeadCleanup.DbTimeout)
 	defer cancel()
@@ -375,12 +400,17 @@ func (w *WorkflowWorker) CleanDeadWorkflows(ctx context.Context) error {
 	}
 
 	if rowsAffected == 0 {
-		log.Printf("[Floww][INFO] No dead workflows to be cleaned up")
+		slog.LogAttrs(ctx, slog.LevelInfo, "No dead workflows to be cleaned up",
+			slog.String("component", "floww"),
+		)
 
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Cleaned up %d dead workflows", rowsAffected)
+	slog.LogAttrs(ctx, slog.LevelInfo, "Dead workflows cleaned up successfully",
+		slog.String("component", "floww"),
+		slog.Uint64("deleted_workflow_count", uint64(rowsAffected)),
+	)
 
 	return nil
 }
