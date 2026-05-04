@@ -3,7 +3,7 @@ package floww
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -173,7 +173,10 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 	// Fetch activities from db first
 	activities, err := w.fetchActivities(ctx)
 	if err != nil {
-		log.Printf("[Floww][ERROR] Failed to fetch activities: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch activities",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -191,7 +194,11 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 			activity := &activities[i]
 
 			if actErr := w.handleActivity(ctx, activity); actErr != nil {
-				log.Printf("[Floww][ERROR] Failed to handle activity with id '%s': %v", activity.ID, actErr)
+				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle an activity",
+					slog.String("component", "floww"),
+					slog.String("activity_id", activity.ID.String()),
+					slog.String("error", actErr.Error()),
+				)
 			}
 
 			return nil
@@ -199,7 +206,10 @@ func (w *ActivityWorker) processActivities(ctx context.Context) int {
 	}
 
 	if err = gr.Wait(); err != nil {
-		log.Printf("[Floww][ERROR] Failed to wait for all activities to complete: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to wait for all activities to complete",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -225,9 +235,10 @@ func (w *ActivityWorker) fetchActivities(ctx context.Context) ([]ActivityRecord,
 func (w *ActivityWorker) handleActivity(ctx context.Context, activity *ActivityRecord) error {
 	handler, exists := w.registry.handlers[activity.Name]
 	if !exists {
-		log.Printf(
-			"[Floww][ERROR] No handler registered for activity '%s', task '%s' will be rescheduled",
-			activity.Name, activity.ID,
+		slog.LogAttrs(ctx, slog.LevelError, "No handler registered for the activity, a task will be rescheduled",
+			slog.String("component", "floww"),
+			slog.String("activity", activity.Name),
+			slog.String("activity_id", activity.ID.String()),
 		)
 
 		return w.handleActivityError(

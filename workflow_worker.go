@@ -3,7 +3,7 @@ package floww
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -194,7 +194,10 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 	// Fetch tasks from db first
 	tasks, err := w.fetchWorkflowTasks(ctx)
 	if err != nil {
-		log.Printf("[Floww][ERROR] Failed to fetch tasks: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch workflow tasks",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -212,7 +215,11 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 			task := &tasks[i]
 
 			if taskErr := w.handleWorkflowTask(ctx, task); taskErr != nil {
-				log.Printf("[Floww][ERROR] Failed to handle task with id '%s': %v", task.ID, taskErr)
+				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle a task",
+					slog.String("component", "floww"),
+					slog.String("task_id", task.ID.String()),
+					slog.String("error", taskErr.Error()),
+				)
 			}
 
 			return nil
@@ -220,7 +227,10 @@ func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context) int {
 	}
 
 	if err = gr.Wait(); err != nil {
-		log.Printf("[Floww][ERROR] Failed to wait for all tasks to complete: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "Failed to wait for all tasks to complete",
+			slog.String("component", "floww"),
+			slog.String("error", err.Error()),
+		)
 
 		return 0
 	}
@@ -246,9 +256,10 @@ func (w *WorkflowWorker) fetchWorkflowTasks(ctx context.Context) ([]WorkflowTask
 func (w *WorkflowWorker) handleWorkflowTask(ctx context.Context, task *WorkflowTaskRecord) error {
 	handler, exists := w.registry.handlers[task.Workflow.Name]
 	if !exists {
-		log.Printf(
-			"[Floww][ERROR] No handler registered for workflow '%s', task '%s' will be rescheduled",
-			task.Workflow.Name, task.ID,
+		slog.LogAttrs(ctx, slog.LevelError, "No handler registered for the workflow, a task will be rescheduled",
+			slog.String("component", "floww"),
+			slog.String("workflow", task.Workflow.Name),
+			slog.String("task_id", task.ID.String()),
 		)
 
 		return w.handleWorkflowTaskError(
@@ -330,7 +341,9 @@ func (w *WorkflowWorker) CleanColdWorkflows(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Running cold workflows cleaner...")
+	slog.LogAttrs(ctx, slog.LevelInfo, "Running cold workflows cleaner...",
+		slog.String("component", "floww"),
+	)
 
 	ctx, cancel := context.WithTimeout(ctx, w.config.ColdCleanup.DbTimeout)
 	defer cancel()
@@ -343,12 +356,17 @@ func (w *WorkflowWorker) CleanColdWorkflows(ctx context.Context) error {
 	}
 
 	if rowsAffected == 0 {
-		log.Printf("[Floww][INFO] No cold workflows to be cleaned up")
+		slog.LogAttrs(ctx, slog.LevelInfo, "No cold workflows to be cleaned up",
+			slog.String("component", "floww"),
+		)
 
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Cleaned up %d cold workflows", rowsAffected)
+	slog.LogAttrs(ctx, slog.LevelInfo, "Cold workflows cleaned up successfully",
+		slog.String("component", "floww"),
+		slog.Uint64("deleted_workflow_count", uint64(rowsAffected)),
+	)
 
 	return nil
 }
@@ -362,7 +380,9 @@ func (w *WorkflowWorker) CleanDeadWorkflows(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Running dead workflows cleaner...")
+	slog.LogAttrs(ctx, slog.LevelInfo, "Running dead workflows cleaner...",
+		slog.String("component", "floww"),
+	)
 
 	ctx, cancel := context.WithTimeout(ctx, w.config.DeadCleanup.DbTimeout)
 	defer cancel()
@@ -375,12 +395,17 @@ func (w *WorkflowWorker) CleanDeadWorkflows(ctx context.Context) error {
 	}
 
 	if rowsAffected == 0 {
-		log.Printf("[Floww][INFO] No dead workflows to be cleaned up")
+		slog.LogAttrs(ctx, slog.LevelInfo, "No dead workflows to be cleaned up",
+			slog.String("component", "floww"),
+		)
 
 		return nil
 	}
 
-	log.Printf("[Floww][INFO] Cleaned up %d dead workflows", rowsAffected)
+	slog.LogAttrs(ctx, slog.LevelInfo, "Dead workflows cleaned up successfully",
+		slog.String("component", "floww"),
+		slog.Uint64("deleted_workflow_count", uint64(rowsAffected)),
+	)
 
 	return nil
 }
