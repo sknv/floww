@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 )
 
 //
@@ -140,6 +139,7 @@ func (w *WorkflowWorker) Start(ctx context.Context, workflows ...string) {
 }
 
 // Stop signals the worker to stop and waits until it finishes or the context expires.
+// It waits for the polling loop AND all in-flight task goroutines to complete.
 func (w *WorkflowWorker) Stop(ctx context.Context) error {
 	close(w.stopped) // stop signal
 
@@ -160,8 +160,19 @@ func (w *WorkflowWorker) Stop(ctx context.Context) error {
 	}
 }
 
-// runHandlerWorker starts a worker to process the workflows for the specified names.
+// runHandlerWorker is the main polling loop. It maintains a semaphore of size Concurrency.
+//
+// On every tick it checks how many slots are free and fetches up to that many tasks
+// (capped at BatchSize). Each task is dispatched to its own goroutine immediately;
+// the goroutine releases its slot when done so the next tick can fill it again.
+//
+// This means a slow workflow task never blocks faster ones from being picked up: as soon
+// as any goroutine finishes, its slot becomes available for new work on the very next poll.
 func (w *WorkflowWorker) runHandlerWorker(ctx context.Context, workflows []string) {
+	// sem is a counting semaphore. Sending acquires a slot; receiving releases it.
+	// Its capacity is the maximum number of concurrently running task goroutines.
+	sem := make(chan struct{}, w.config.Poll.Concurrency)
+
 	ticker := time.NewTicker(w.config.Poll.PollInterval)
 	defer ticker.Stop()
 
@@ -171,13 +182,14 @@ func (w *WorkflowWorker) runHandlerWorker(ctx context.Context, workflows []strin
 			// Force stop (should never happen though)
 			return
 		case <-w.stopped:
-			// Graceful stop
+			// Graceful stop — in-flight goroutines are tracked by w.wg and will be
+			// awaited by Stop() after this function returns.
 			return
 		case <-ticker.C:
+			// Keep fetching as long as there are free slots and pending work.
 			for {
-				fetched := w.processWorkflowTasks(ctx, workflows)
-				if fetched == 0 {
-					break // no more tasks, wait for the next timer tick
+				if isDrained := w.processWorkflowTasks(ctx, workflows, sem); isDrained {
+					break // no more tasks for now, wait for the next timer tick
 				}
 
 				// There are more tasks to process, handle them immediately.
@@ -192,62 +204,72 @@ func (w *WorkflowWorker) runHandlerWorker(ctx context.Context, workflows []strin
 	}
 }
 
-// processWorkflowTasks fetches batch of workflows for the specified names from db and routes them to handlers.
-// Returns total count of fetched workflows.
-func (w *WorkflowWorker) processWorkflowTasks(ctx context.Context, workflows []string) int {
-	// Fetch tasks from db first
-	tasks, err := w.fetchWorkflowTasks(ctx, workflows)
+// processWorkflowTasks fetches batch of tasks for the specified workflows from db respecting semaphore slots
+// and routes them to handlers.
+// Returns a flag that a queue is drained.
+func (w *WorkflowWorker) processWorkflowTasks(
+	ctx context.Context,
+	workflows []string,
+	sem chan struct{},
+) bool {
+	// How many goroutine slots are currently available?
+	freeSlots := uint(cap(sem) - len(sem)) //nolint:gosec // unsigned size
+	if freeSlots == 0 {
+		return true // all slots busy; wait for the next tick
+	}
+
+	// Fetch only as many workflows as we have room for, up to BatchSize.
+	fetchSize := min(freeSlots, w.config.Poll.BatchSize)
+
+	tasks, err := w.fetchWorkflowTasks(ctx, workflows, fetchSize)
 	if err != nil {
 		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch workflow tasks",
 			slog.String("component", "floww"),
 			slog.String("error", err.Error()),
 		)
 
-		return 0
+		return true
 	}
 
 	if len(tasks) == 0 {
-		return 0
+		return true // queue is empty; wait for the next tick
 	}
 
-	// Process tasks concurrently respecting concurrency limit
-	gr := errgroup.Group{}
-	gr.SetLimit(w.config.Poll.Concurrency)
-
+	// Dispatch each task to its own goroutine immediately.
+	// We already verified there are enough free slots, so the send won't block.
 	for i := range tasks {
-		gr.Go(func() error {
-			task := &tasks[i]
+		sem <- struct{}{} // acquire slot
+
+		task := &tasks[i]
+
+		w.wg.Go(func() {
+			defer func() { <-sem }() // release slot when done
 
 			if taskErr := w.handleWorkflowTask(ctx, task); taskErr != nil {
-				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle a task",
+				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle a workflow task",
 					slog.String("component", "floww"),
 					slog.String("task_id", task.ID.String()),
 					slog.String("error", taskErr.Error()),
 				)
 			}
-
-			return nil
 		})
 	}
 
-	if err = gr.Wait(); err != nil {
-		slog.LogAttrs(ctx, slog.LevelError, "Failed to wait for all tasks to complete",
-			slog.String("component", "floww"),
-			slog.String("error", err.Error()),
-		)
-
-		return 0
-	}
-
-	return len(tasks)
+	// If the storage returned fewer workflows than we asked for, the queue is
+	// drained for now — no point querying again this tick.
+	return uint(len(tasks)) < fetchSize
 }
 
-// fetchWorkflowTasks fetches batch of tasks from db for the specified workflows.
-func (w *WorkflowWorker) fetchWorkflowTasks(ctx context.Context, workflows []string) ([]WorkflowTaskRecord, error) {
+// fetchWorkflowTasks fetches up to fetchSize workflow tasks from storage.
+func (w *WorkflowWorker) fetchWorkflowTasks(
+	ctx context.Context,
+	workflows []string,
+	fetchSize uint,
+) ([]WorkflowTaskRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
 
-	tasks, err := w.storage.ListActiveWorkflowTasks(ctx, workflows, w.config.Poll.BatchSize)
+	tasks, err := w.storage.ListActiveWorkflowTasks(ctx, workflows, fetchSize)
 	if err != nil {
 		return nil, fmt.Errorf("list active workflow tasks from storage: %w", err)
 	}
@@ -295,7 +317,7 @@ func (w *WorkflowWorker) completeWorkflowTask(ctx context.Context, task *Workflo
 	return nil
 }
 
-// handleWorkflowTaskError handles job processing errors with backoff.
+// handleWorkflowTaskError handles task processing errors with backoff.
 func (w *WorkflowWorker) handleWorkflowTaskError(
 	ctx context.Context,
 	workflowHandler *workflowHandlerWrapper,
@@ -323,7 +345,7 @@ func (w *WorkflowWorker) handleWorkflowTaskError(
 	return nil
 }
 
-// failJob immediately fails a workflow task moving it to the dead letter queue.
+// failWorkflowTask immediately fails a workflow task moving it to the dead letter queue.
 func (w *WorkflowWorker) failWorkflowTask(ctx context.Context, task *WorkflowTaskRecord, err error) error {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()

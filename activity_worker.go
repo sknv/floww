@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 )
 
 //
@@ -119,6 +118,7 @@ func (w *ActivityWorker) Start(ctx context.Context, activities ...string) {
 }
 
 // Stop signals the worker to stop and waits until it finishes or the context expires.
+// It waits for the polling loop AND all in-flight activity goroutines to complete.
 func (w *ActivityWorker) Stop(ctx context.Context) error {
 	close(w.stopped) // stop signal
 
@@ -139,8 +139,19 @@ func (w *ActivityWorker) Stop(ctx context.Context) error {
 	}
 }
 
-// runHandlerWorker starts a worker to process the activities for the specified names.
+// runHandlerWorker is the main polling loop. It maintains a semaphore of size Concurrency.
+//
+// On every tick it checks how many slots are free and fetches up to that many activities
+// (capped at BatchSize). Each activity is dispatched to its own goroutine immediately;
+// the goroutine releases its slot when done so the next tick can fill it again.
+//
+// This means a slow activity never blocks faster ones from being picked up: as soon as any
+// goroutine finishes, its slot becomes available for new work on the very next poll.
 func (w *ActivityWorker) runHandlerWorker(ctx context.Context, activities []string) {
+	// sem is a counting semaphore. Sending acquires a slot; receiving releases it.
+	// Its capacity is the maximum number of concurrently running activity goroutines.
+	sem := make(chan struct{}, w.config.Poll.Concurrency)
+
 	ticker := time.NewTicker(w.config.Poll.PollInterval)
 	defer ticker.Stop()
 
@@ -150,13 +161,14 @@ func (w *ActivityWorker) runHandlerWorker(ctx context.Context, activities []stri
 			// Force stop (should never happen though)
 			return
 		case <-w.stopped:
-			// Graceful stop
+			// Graceful stop — in-flight goroutines are tracked by w.wg and will be
+			// awaited by Stop() after this function returns.
 			return
 		case <-ticker.C:
+			// Keep fetching as long as there are free slots and pending work.
 			for {
-				fetched := w.processActivities(ctx, activities)
-				if fetched == 0 {
-					break // no more tasks, wait for the next timer tick
+				if isDrained := w.processActivities(ctx, activities, sem); isDrained {
+					break // no more activities for now, wait for the next timer tick
 				}
 
 				// There are more activities to process, handle them immediately.
@@ -171,31 +183,46 @@ func (w *ActivityWorker) runHandlerWorker(ctx context.Context, activities []stri
 	}
 }
 
-// processActivities fetches batch of activities for the specified names from db and routes them to handlers.
-// Returns total count of fetched activities.
-func (w *ActivityWorker) processActivities(ctx context.Context, activities []string) int {
-	// Fetch activities from db first
-	tasks, err := w.fetchActivities(ctx, activities)
+// processActivities fetches batch of tasks for the specified activities from db respecting semaphore slots
+// and routes them to handlers.
+// Returns a flag that a queue is drained.
+func (w *ActivityWorker) processActivities(
+	ctx context.Context,
+	activities []string,
+	sem chan struct{},
+) bool {
+	// How many goroutine slots are currently available?
+	freeSlots := uint(cap(sem) - len(sem)) //nolint:gosec // unsigned size
+	if freeSlots == 0 {
+		return true // all slots busy; wait for the next tick
+	}
+
+	// Fetch only as many activities as we have room for, up to BatchSize.
+	fetchSize := min(freeSlots, w.config.Poll.BatchSize)
+
+	tasks, err := w.fetchActivities(ctx, activities, fetchSize)
 	if err != nil {
 		slog.LogAttrs(ctx, slog.LevelError, "Failed to fetch activities",
 			slog.String("component", "floww"),
 			slog.String("error", err.Error()),
 		)
 
-		return 0
+		return true
 	}
 
 	if len(tasks) == 0 {
-		return 0
+		return true // queue is empty; wait for the next tick
 	}
 
-	// Process tasks concurrently respecting concurrency limit
-	gr := errgroup.Group{}
-	gr.SetLimit(w.config.Poll.Concurrency)
-
+	// Dispatch each task to its own goroutine immediately.
+	// We already verified there are enough free slots, so the send won't block.
 	for i := range tasks {
-		gr.Go(func() error {
-			activity := &tasks[i]
+		sem <- struct{}{} // acquire slot
+
+		activity := &tasks[i]
+
+		w.wg.Go(func() {
+			defer func() { <-sem }() // release slot when done
 
 			if actErr := w.handleActivity(ctx, activity); actErr != nil {
 				slog.LogAttrs(ctx, slog.LevelError, "Failed to handle an activity",
@@ -204,29 +231,24 @@ func (w *ActivityWorker) processActivities(ctx context.Context, activities []str
 					slog.String("error", actErr.Error()),
 				)
 			}
-
-			return nil
 		})
 	}
 
-	if err = gr.Wait(); err != nil {
-		slog.LogAttrs(ctx, slog.LevelError, "Failed to wait for all activities to complete",
-			slog.String("component", "floww"),
-			slog.String("error", err.Error()),
-		)
-
-		return 0
-	}
-
-	return len(tasks)
+	// If the storage returned fewer activities than we asked for, the queue is
+	// drained for now — no point querying again this tick.
+	return uint(len(tasks)) < fetchSize
 }
 
-// fetchActivities fetches batch of activities from db for the specified activities.
-func (w *ActivityWorker) fetchActivities(ctx context.Context, activities []string) ([]ActivityRecord, error) {
+// fetchActivities fetches up to fetchSize activities from storage.
+func (w *ActivityWorker) fetchActivities(
+	ctx context.Context,
+	activities []string,
+	fetchSize uint,
+) ([]ActivityRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
 
-	tasks, err := w.storage.ListActiveActivities(ctx, activities, w.config.Poll.BatchSize)
+	tasks, err := w.storage.ListActiveActivities(ctx, activities, fetchSize)
 	if err != nil {
 		return nil, fmt.Errorf("list active activities from storage: %w", err)
 	}
@@ -303,7 +325,7 @@ func (w *ActivityWorker) handleActivityError(
 	return nil
 }
 
-// failJob immediately fails an activity moving it to the dead letter queue.
+// failActivity immediately fails an activity moving it to the dead letter queue.
 func (w *ActivityWorker) failActivity(ctx context.Context, activity *ActivityRecord, err error) error {
 	ctx, cancel := context.WithTimeout(ctx, w.config.Processing.DbTimeout)
 	defer cancel()
