@@ -49,7 +49,15 @@ func ExecuteActivityAsync[I any, O any](
 	input I,
 	opts ...ActivityOption,
 ) (Future[O], error) {
-	idempotencyKey := activity.IdempotencyKey(ctx.WorkflowID())
+	// Provide default activity options with idempotency key first and then apply the provided ones
+	options := defaultActivityOptionsFor(
+		activity.IdempotencyKey(ctx.WorkflowID()),
+	)
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	idempotencyKey := options.idempotencyKey
 
 	if event, ok := ctx.history[idempotencyKey]; ok {
 		return Future[O]{
@@ -58,11 +66,6 @@ func ExecuteActivityAsync[I any, O any](
 	}
 
 	id := uuid.Must(uuid.NewV7())
-
-	options := defaultActivityOptions()
-	for _, opt := range opts {
-		opt(&options)
-	}
 
 	if err := ctx.storage.InsertActivity(
 		ctx.ctx, activity.Name, id, idempotencyKey, ctx.workflowID, input, options,
