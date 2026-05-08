@@ -68,7 +68,7 @@ func EnqueueOrderWorkflow(ctx context.Context, storage floww.Storage, txer floww
 		storage,
 		txer,
 		OrderWorkflow,
-		uuid.Must(uuid.NewV7()),
+		uuid.Must(uuid.NewV7()), // provide predictive idempotency key instead if you want to
 		OrderInput{
 			UserID: uuid.NewString(),
 			Amount: rand.IntN(100),

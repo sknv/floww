@@ -22,7 +22,12 @@ func NewActivity[I any, O any](name string) Activity[I, O] {
 
 // IdempotencyKey provides predictive idempotency key for the provided workflow id.
 func (a Activity[I, O]) IdempotencyKey(workflowID uuid.UUID) uuid.UUID {
-	return uuid.NewSHA1(workflowID, []byte(a.Name))
+	return a.IdempotencyKeyFor(workflowID, "")
+}
+
+// IdempotencyKeyFor provides predictive idempotency key for the provided workflow id respecting the salt argument.
+func (a Activity[I, O]) IdempotencyKeyFor(workflowID uuid.UUID, salt string) uuid.UUID {
+	return uuid.NewSHA1(workflowID, []byte(a.Name+salt))
 }
 
 //
@@ -56,39 +61,41 @@ func WithActivityBackoffCalculator(backoffCalculator BackoffCalculator) Activity
 
 // ActivityOptions is an inner holder of provided activity options.
 type ActivityOptions struct {
-	priority     int
-	maxAttempts  uint
-	stuckTimeout time.Duration
-	scheduledAt  time.Time
+	idempotencyKey uuid.UUID
+	priority       int
+	maxAttempts    uint
+	stuckTimeout   time.Duration
+	scheduledAt    time.Time
 }
 
-// defaultActivityOptions returns the default options for a workflow.
-func defaultActivityOptions() ActivityOptions {
+// defaultActivityOptionsFor returns the default options for an activity with provided idempotency key.
+func defaultActivityOptionsFor(idempotencyKey uuid.UUID) ActivityOptions {
 	//nolint:mnd // default values
 	return ActivityOptions{
-		priority:     0,
-		maxAttempts:  1,
-		stuckTimeout: time.Minute * 5,
-		scheduledAt:  time.Now(),
+		idempotencyKey: idempotencyKey,
+		priority:       0,
+		maxAttempts:    1,
+		stuckTimeout:   time.Minute * 5,
+		scheduledAt:    time.Now(),
 	}
 }
 
-// Priority returns workflow priority.
+// Priority returns activity priority.
 func (o ActivityOptions) Priority() int {
 	return o.priority
 }
 
-// MaxAttempts returns workflow max attempt count.
+// MaxAttempts returns activity max attempt count.
 func (o ActivityOptions) MaxAttempts() uint {
 	return o.maxAttempts
 }
 
-// StuckTimeoutMillis returns workflow stuck timeout in milliseconds.
+// StuckTimeoutMillis returns activity stuck timeout in milliseconds.
 func (o ActivityOptions) StuckTimeoutMillis() int64 {
 	return int64(o.stuckTimeout / time.Millisecond)
 }
 
-// ScheduledAt returns workflow schedule.
+// ScheduledAt returns activity schedule.
 func (o ActivityOptions) ScheduledAt() time.Time {
 	return o.scheduledAt
 }
@@ -96,7 +103,14 @@ func (o ActivityOptions) ScheduledAt() time.Time {
 // ActivityOption is a function to configure activity options.
 type ActivityOption func(*ActivityOptions)
 
-// WithActivityPriority sets the workflow priority.
+// WithActivityIdempotencyKey sets the idempotency key explicitly.
+func WithActivityIdempotencyKey(idempotencyKey uuid.UUID) ActivityOption {
+	return func(o *ActivityOptions) {
+		o.idempotencyKey = idempotencyKey
+	}
+}
+
+// WithActivityPriority sets the activity priority.
 func WithActivityPriority(priority int) ActivityOption {
 	return func(o *ActivityOptions) {
 		o.priority = priority
@@ -110,14 +124,14 @@ func WithActivityMaxAttempts(attempts uint) ActivityOption {
 	}
 }
 
-// WithActivityStuckTimeout sets when the workflow should be considered as stuck.
+// WithActivityStuckTimeout sets when the activity should be considered as stuck.
 func WithActivityStuckTimeout(t time.Duration) ActivityOption {
 	return func(o *ActivityOptions) {
 		o.stuckTimeout = t
 	}
 }
 
-// WithActivityScheduledAt sets when the workflow should be executed.
+// WithActivityScheduledAt sets when the activity should be executed.
 func WithActivityScheduledAt(t time.Time) ActivityOption {
 	return func(o *ActivityOptions) {
 		o.scheduledAt = t

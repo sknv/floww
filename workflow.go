@@ -210,6 +210,7 @@ func EnqueueWorkflow[I any](
 ) error {
 	id := uuid.Must(uuid.NewV7())
 
+	// Provide default workflow options first and then apply the provided ones
 	options := defaultWorkflowOptions()
 	for _, opt := range opts {
 		opt(&options)
