@@ -295,14 +295,20 @@ func (s *Storage) ListActiveWorkflowTasks(
 
 // CompleteWorkflowTask marks the workflow task as completed and clears
 // the workflow error message. Returns an error if the task does not exist.
-func (s *Storage) CompleteWorkflowTask(ctx context.Context, workflowTaskID uuid.UUID, workflowID uuid.UUID) error {
+func (s *Storage) CompleteWorkflowTask(
+	ctx context.Context,
+	workflowTaskID uuid.UUID,
+	workflowID uuid.UUID,
+) error {
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Mark the task as completed
 		if txErr := s.completeWorkflowTask(ctx, tx, workflowTaskID); txErr != nil {
-			return fmt.Errorf("complete workflow task tx: %w", txErr)
+			return fmt.Errorf("complete workflow task: %w", txErr)
 		}
 
+		// Clear an in-between workflow error
 		if txErr := s.clearWorkflowError(ctx, tx, workflowID); txErr != nil {
-			return fmt.Errorf("clear workflow error tx: %w", txErr)
+			return fmt.Errorf("clear workflow error: %w", txErr)
 		}
 
 		return nil
@@ -365,12 +371,14 @@ func (s *Storage) ReScheduleWorkflowTask(
 	errorMessage string,
 ) error {
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Run workflow task againg
 		if txErr := s.reScheduleWorkflowTask(ctx, tx, workflowTaskID, scheduledAt); txErr != nil {
-			return fmt.Errorf("reschedule workflow task tx: %w", txErr)
+			return fmt.Errorf("reschedule workflow task: %w", txErr)
 		}
 
+		// Increment total workflow attempts
 		if txErr := s.incrementWorkflowAttempts(ctx, tx, workflowID, errorMessage); txErr != nil {
-			return fmt.Errorf("increment workflow attempts tx: %w", txErr)
+			return fmt.Errorf("increment workflow attempts: %w", txErr)
 		}
 
 		return nil
@@ -443,10 +451,12 @@ func (s *Storage) FailWorkflowTask(
 	errorMessage string,
 ) error {
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Mark the workflow task as failed
 		if txErr := s.failWorkflowTask(ctx, tx, workflowTaskID); txErr != nil {
-			return fmt.Errorf("fail workflow task tx: %w", txErr)
+			return fmt.Errorf("fail workflow task: %w", txErr)
 		}
 
+		// Mark the workflow as failed
 		if txErr := s.failWorkflow(ctx, tx, workflowID, errorMessage); txErr != nil {
 			return fmt.Errorf("fail workflow: %w", txErr)
 		}

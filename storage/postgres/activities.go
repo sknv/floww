@@ -269,15 +269,17 @@ func (s *Storage) CompleteActivity(
 	output any,
 ) error {
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Mark the activity as completed
 		if txErr := s.completeActivity(ctx, tx, activityID, output); txErr != nil {
-			return fmt.Errorf("complete activity tx: %w", txErr)
+			return fmt.Errorf("complete activity: %w", txErr)
 		}
 
+		// Resume workflow
 		taskID := uuid.Must(uuid.NewV7())
 		taskSchedule := time.Now()
 
 		if txErr := s.insertWorkflowTask(ctx, tx, taskID, workflowID, taskSchedule); txErr != nil {
-			return fmt.Errorf("insert workflow task tx: %w", txErr)
+			return fmt.Errorf("insert workflow task: %w", txErr)
 		}
 
 		return nil
@@ -373,10 +375,12 @@ func (s *Storage) FailActivity(
 	errorMessage string,
 ) error {
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// Mark the activity as failed
 		if txErr := s.failActivity(ctx, tx, activityID, errorMessage); txErr != nil {
-			return fmt.Errorf("fail activity tx: %w", txErr)
+			return fmt.Errorf("fail activity: %w", txErr)
 		}
 
+		// Mark the workflow as failed
 		if txErr := s.failWorkflow(ctx, tx, workflowID, errorMessage); txErr != nil {
 			return fmt.Errorf("fail workflow: %w", txErr)
 		}

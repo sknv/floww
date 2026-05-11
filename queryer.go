@@ -12,6 +12,11 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
+// QueryRower is satisfied by *pgxpool.Pool, *pgx.Conn, and pgx.Tx.
+type QueryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // TxBeginner is satisfied by *pgxpool.Pool, *pgx.Conn, and pgx.Tx.
 type TxBeginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)

@@ -22,12 +22,13 @@ func NewActivity[I any, O any](name string) Activity[I, O] {
 
 // IdempotencyKey provides predictive idempotency key for the provided workflow id.
 func (a Activity[I, O]) IdempotencyKey(workflowID uuid.UUID) uuid.UUID {
-	return a.IdempotencyKeyFor(workflowID, "")
+	return a.IdempotencyKeyByString(workflowID, "")
 }
 
-// IdempotencyKeyFor provides predictive idempotency key for the provided workflow id respecting the salt argument.
-func (a Activity[I, O]) IdempotencyKeyFor(workflowID uuid.UUID, salt string) uuid.UUID {
-	return uuid.NewSHA1(workflowID, []byte(a.Name+salt))
+// IdempotencyKeyByString provides predictive idempotency key for the provided workflow id
+// respecting the string argument.
+func (a Activity[I, O]) IdempotencyKeyByString(workflowID uuid.UUID, str string) uuid.UUID {
+	return uuid.NewSHA1(workflowID, []byte(a.Name+str))
 }
 
 //

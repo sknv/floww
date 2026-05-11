@@ -29,6 +29,7 @@ type (
 type (
 	EmailInput struct {
 		UserID        string
+		IsCharged     bool
 		ChargedAmount int
 	}
 	EmailOutput struct {
@@ -40,6 +41,16 @@ var (
 	ChargeCardActivity = floww.NewActivity[ChargeInput, ChargeOutput]("ChargeCard")
 	SendEmailActivity  = floww.NewActivity[EmailInput, EmailOutput]("SendEmail")
 )
+
+//
+// Example signal
+//
+
+type NotifySignalInput struct {
+	ShouldNotify bool
+}
+
+var NotifySignal = floww.NewSignal[NotifySignalInput]("NotifySignal")
 
 //
 // Example workflow
@@ -63,22 +74,49 @@ func RegisterWorkflow(activityRegistry *floww.ActivityRegistry, workflowRegistry
 
 // EnqueueOrderWorkflow schedules workflow processing.
 func EnqueueOrderWorkflow(ctx context.Context, storage floww.Storage, txer floww.TxBeginner) error {
-	if err := floww.EnqueueWorkflow(
+	workflowIdempotencyKey := uuid.Must(uuid.NewV7()) // provide predictive idempotency key instead if you want to
+
+	workflowID, err := floww.EnqueueWorkflow(
 		ctx,
 		storage,
 		txer,
 		OrderWorkflow,
-		uuid.Must(uuid.NewV7()), // provide predictive idempotency key instead if you want to
+		workflowIdempotencyKey,
 		OrderInput{
 			UserID: uuid.NewString(),
 			Amount: rand.IntN(100),
 		},
 		floww.WithWorkflowMaxAttempts(3),
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
 
 	fmt.Println("Order workflow is scheduled successfully")
+
+	// Simulate external signal sending using goroutine for simplicity
+	go func() {
+		time.Sleep(time.Second * 30)
+
+		shouldNotify := rand.IntN(2)%2 == 0
+
+		if err := floww.SendSignal(
+			ctx,
+			storage,
+			txer,
+			workflowID,
+			NotifySignal,
+			NotifySignalInput{
+				ShouldNotify: shouldNotify,
+			},
+		); err != nil {
+			fmt.Println("[ERROR] Can not emit notify signal for workflow id", workflowID, err)
+
+			return
+		}
+
+		fmt.Println("Notify signal is emited successfully, should notify user:", shouldNotify)
+	}()
 
 	return nil
 }
@@ -104,23 +142,29 @@ func RunOrderWorkflow(ctx *floww.WorkflowContext, in OrderInput) error {
 	// !!! Note that this line will be repeated during history replay !!!
 	fmt.Println("Charge result is:", charged.IsCharged, "| user is:", in.UserID, "| workflow is", ctx.WorkflowID())
 
-	if !charged.IsCharged {
-		// Implement your custom error handling logic here
-		fmt.Println("[ERROR] Can not charge customer", in.UserID)
-
-		return floww.Unrecoverable(fmt.Errorf("can not charge customer %s", in.UserID))
+	// Wait for an external signal to make a decision if a user should be notified
+	notify, err := floww.ReceiveSignal(ctx, NotifySignal)
+	if err != nil {
+		return fmt.Errorf("can not handle notify signal %w", err)
 	}
 
-	// Wait for 1 minute before notifying
+	if !notify.ShouldNotify {
+		fmt.Println("Should not notify customer", in.UserID)
+
+		return nil
+	}
+
+	// Wait for 30 seconds before notifying
 	_, err = floww.ExecuteActivity(
 		ctx,
 		SendEmailActivity,
 		EmailInput{
 			UserID:        in.UserID,
+			IsCharged:     charged.IsCharged,
 			ChargedAmount: charged.ChargedAmount,
 		},
 		floww.WithActivityMaxAttempts(3),
-		floww.WithActivityScheduledAt(time.Now().Add(time.Minute)),
+		floww.WithActivityScheduledAt(time.Now().Add(time.Second*30)),
 	)
 	if err != nil {
 		return fmt.Errorf("notify customer: %w", err)
@@ -130,7 +174,7 @@ func RunOrderWorkflow(ctx *floww.WorkflowContext, in OrderInput) error {
 }
 
 func ChargeCard(ctx context.Context, in ChargeInput) (ChargeOutput, error) {
-	fmt.Println("Charging customer for amount:", in.Amount, "| user is:", in.UserID)
+	fmt.Println("Charging customer for amount:", in.Amount, "| user is:", in.UserID, "...")
 
 	// Simulate delay
 	time.Sleep(time.Millisecond * 100)
@@ -153,8 +197,13 @@ func ChargeCard(ctx context.Context, in ChargeInput) (ChargeOutput, error) {
 }
 
 func SendEmail(ctx context.Context, in EmailInput) (EmailOutput, error) {
-	fmt.Println("Email to:", in.UserID)
-	fmt.Println("Charged amount:", in.ChargedAmount)
+	fmt.Println("Sending email to:", in.UserID, "...")
+
+	if in.IsCharged {
+		fmt.Println("Notify about charged amount:", in.ChargedAmount)
+	} else {
+		fmt.Println("Notify about nothing charged")
+	}
 
 	// Simulate delay
 	time.Sleep(time.Millisecond * 100)

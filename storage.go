@@ -19,8 +19,8 @@ type Storage interface {
 		idempotencyKey uuid.UUID,
 		input any,
 		options WorkflowOptions,
-	) error
-	ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID) (HistoryEvents, error)
+	) (uuid.UUID, error)
+	ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID) (Events, error)
 	CompleteWorkflow(ctx context.Context, id uuid.UUID) error
 	DeleteColdWorkflows(ctx context.Context, cutoffDate time.Time, limit uint) (uint, error)
 	DeleteDeadWorkflows(ctx context.Context, cutoffDate time.Time, limit uint) (uint, error)
@@ -69,6 +69,17 @@ type Storage interface {
 		workflowID uuid.UUID,
 		errorMessage string,
 	) error
+
+	InsertSignal(
+		ctx context.Context,
+		txer TxBeginner,
+		workflowID uuid.UUID,
+		signalID uuid.UUID,
+		signalIdempotencyKey uuid.UUID,
+		signalName string,
+		signalInput any,
+	) error
+	ListWorkflowSignals(ctx context.Context, workflowID uuid.UUID) (Events, error)
 
 	Decoder() Decoder
 }

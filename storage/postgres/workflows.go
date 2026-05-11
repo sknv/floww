@@ -11,9 +11,8 @@ import (
 	"github.com/sknv/floww"
 )
 
-// InsertWorkflow creates a new workflow and schedules its first workflow task.
+// InsertWorkflow creates a new workflow, schedules its first workflow task and returns an upserted workflow id.
 // The workflow insert and task creation are executed in a single transaction.
-// If a workflow with the same idempotency key already exists, the insert is ignored.
 func (s *Storage) InsertWorkflow(
 	ctx context.Context,
 	txer floww.TxBeginner,
@@ -22,9 +21,14 @@ func (s *Storage) InsertWorkflow(
 	idempotencyKey uuid.UUID,
 	input any,
 	options floww.WorkflowOptions,
-) error {
+) (uuid.UUID, error) {
+	var upsertedID uuid.UUID
+
 	err := pgx.BeginFunc(ctx, txer, func(tx pgx.Tx) error {
-		if txErr := s.insertWorkflow(
+		var txErr error
+
+		// Insert a workflow first
+		upsertedID, txErr = s.insertWorkflow(
 			ctx,
 			tx,
 			name,
@@ -34,36 +38,37 @@ func (s *Storage) InsertWorkflow(
 			options.Priority(),
 			options.MaxAttempts(),
 			options.StuckTimeoutMillis(),
-		); txErr != nil {
-			return fmt.Errorf("insert workflow tx: %w", txErr)
+		)
+		if txErr != nil {
+			return fmt.Errorf("insert workflow: %w", txErr)
 		}
 
+		// Insert a corresponding task
 		taskID := uuid.Must(uuid.NewV7())
 
-		if txErr := s.insertWorkflowTask(ctx, tx, taskID, id, options.ScheduledAt()); txErr != nil {
-			return fmt.Errorf("insert workflow task tx: %w", txErr)
+		if txErr = s.insertWorkflowTask(ctx, tx, taskID, id, options.ScheduledAt()); txErr != nil {
+			return fmt.Errorf("insert workflow task: %w", txErr)
 		}
 
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("exec transaction: %w", err)
+		return uuid.Nil, fmt.Errorf("exec transaction: %w", err)
 	}
 
-	return nil
+	return upsertedID, nil
 }
 
-// insertWorkflow inserts a workflow record into storage.
+// insertWorkflow inserts a workflow record into storage and returns an upserted workflow id.
 //
 // It encodes the input payload (if provided) and persists execution parameters.
 //
 // IMPORTANT:
 // - Intended to be called inside a transaction together with task creation.
-// - Uses idempotency key to guarantee safe retries (ON CONFLICT DO NOTHING).
-// - Does not verify whether the insert actually happened (caller may rely on idempotency).
+// - Uses idempotency key to guarantee safe retries (ON CONFLICT DO UPDATE).
 func (s *Storage) insertWorkflow(
 	ctx context.Context,
-	execer floww.Execer,
+	queryer floww.QueryRower,
 	name string,
 	id uuid.UUID,
 	idempotencyKey uuid.UUID,
@@ -71,15 +76,18 @@ func (s *Storage) insertWorkflow(
 	priority int,
 	maxAttempts uint,
 	stuckTimeoutMillis int64,
-) error {
-	var inputBytes []byte
+) (uuid.UUID, error) {
+	var (
+		inputBytes []byte
+		upsertedID uuid.UUID
+	)
 
 	if input != nil {
 		var err error
 
 		inputBytes, err = s.encoder.Encode(input)
 		if err != nil {
-			return fmt.Errorf("encode input: %w", err)
+			return uuid.Nil, fmt.Errorf("encode input: %w", err)
 		}
 	}
 
@@ -94,10 +102,12 @@ func (s *Storage) insertWorkflow(
 		  stuck_timeout_millis
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (idempotency_key) DO NOTHING
+		ON CONFLICT (idempotency_key) DO UPDATE
+		SET id = floww_workflows.id
+		RETURNING id
 	`
 
-	_, err := execer.Exec(
+	err := queryer.QueryRow(
 		ctx,
 		sql,
 		id,
@@ -107,31 +117,34 @@ func (s *Storage) insertWorkflow(
 		priority,
 		maxAttempts,
 		stuckTimeoutMillis,
+	).Scan(
+		&upsertedID,
 	)
 	if err != nil {
-		return fmt.Errorf("exec workflow inserting query: %w", err)
+		return uuid.Nil, fmt.Errorf("exec workflow inserting query: %w", err)
 	}
 
-	return nil
+	return upsertedID, nil
 }
 
+// historyEventRecord holds data to construct an activity history event.
 type historyEventRecord struct {
-	ActivityIdempotencyKey uuid.UUID
-	ActivityOutput         []byte
+	IdempotencyKey uuid.UUID
+	Output         []byte
 }
 
-// ToHistoryEvent converts a raw DB record into a domain HistoryEvent.
+// ToHistoryEvent converts a raw DB record into an activity history event.
 //
 // IMPORTANT:
 // - Decoding is deferred to the provided decoder to allow custom serialization formats.
-// - Assumes ActivityOutput is encoded with the same encoder/decoder pair.
-func (e historyEventRecord) ToHistoryEvent(decoder floww.Decoder) floww.HistoryEvent {
-	return floww.NewHistoryEvent(e.ActivityIdempotencyKey, e.ActivityOutput, decoder)
+// - Assumes Output is encoded with the same encoder/decoder pair.
+func (e historyEventRecord) ToHistoryEvent(decoder floww.Decoder) floww.Event {
+	return floww.NewEvent(e.IdempotencyKey, e.Output, decoder)
 }
 
 // ListHistoryEventsForWorkflow returns all completed activity outputs for a workflow,
 // mapped by activity idempotency key. Results are ordered by activity ID.
-func (s *Storage) ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID) (floww.HistoryEvents, error) {
+func (s *Storage) ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID) (floww.Events, error) {
 	const sql = `
 		SELECT idempotency_key, output
 		FROM floww_activities
@@ -146,20 +159,20 @@ func (s *Storage) ListHistoryEventsForWorkflow(ctx context.Context, id uuid.UUID
 	}
 	defer rows.Close()
 
-	historyEvents := make(floww.HistoryEvents)
+	historyEvents := make(floww.Events)
 
 	for rows.Next() {
 		var historyEvent historyEventRecord
 
 		err = rows.Scan(
-			&historyEvent.ActivityIdempotencyKey,
-			&historyEvent.ActivityOutput,
+			&historyEvent.IdempotencyKey,
+			&historyEvent.Output,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan workflow history event: %w", err)
 		}
 
-		historyEvents[historyEvent.ActivityIdempotencyKey] = historyEvent.ToHistoryEvent(s.Decoder())
+		historyEvents[historyEvent.IdempotencyKey] = historyEvent.ToHistoryEvent(s.Decoder())
 	}
 
 	if err = rows.Err(); err != nil {

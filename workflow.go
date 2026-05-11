@@ -7,9 +7,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
-// ErrWorkflowSuspended is returned by a workflow handler when it is waiting for a pending activity to complete.
+// ErrWorkflowSuspended is returned by a workflow handler when it is waiting for a pending event to complete.
 var ErrWorkflowSuspended = errors.New("workflow suspended")
 
 // Workflow represents a named orchestration unit with typed input I.
@@ -103,14 +104,42 @@ func runWorkflow[I any](
 	input I,
 	handler func(*WorkflowContext, I) error,
 ) error {
-	history, err := storage.ListHistoryEventsForWorkflow(ctx, id)
-	if err != nil {
-		return fmt.Errorf("list history events for workflow [id = %s]: %w", id, err)
+	var (
+		history Events
+		signals Events
+	)
+
+	gr, grCtx := errgroup.WithContext(ctx)
+
+	gr.Go(func() error {
+		var err error
+
+		history, err = storage.ListHistoryEventsForWorkflow(grCtx, id)
+		if err != nil {
+			return fmt.Errorf("list history events for workflow [id = %s]: %w", id, err)
+		}
+
+		return nil
+	})
+
+	gr.Go(func() error {
+		var err error
+
+		signals, err = storage.ListWorkflowSignals(grCtx, id)
+		if err != nil {
+			return fmt.Errorf("list signals for workflow [id = %s]: %w", id, err)
+		}
+
+		return nil
+	})
+
+	if err := gr.Wait(); err != nil {
+		return fmt.Errorf("wait group: %w", err)
 	}
 
-	workflowCtx := NewWorkflowContext(ctx, id, storage, history)
+	workflowCtx := NewWorkflowContext(ctx, id, storage, history, signals)
 
-	err = handler(workflowCtx, input)
+	err := handler(workflowCtx, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrWorkflowSuspended):
@@ -207,17 +236,47 @@ func EnqueueWorkflow[I any](
 	idempotencyKey uuid.UUID,
 	input I,
 	opts ...WorkflowOption,
-) error {
-	id := uuid.Must(uuid.NewV7())
-
+) (uuid.UUID, error) {
 	// Provide default workflow options first and then apply the provided ones
 	options := defaultWorkflowOptions()
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	if err := storage.InsertWorkflow(ctx, txer, workflow.Name, id, idempotencyKey, input, options); err != nil {
-		return fmt.Errorf("insert workflow [name = %s]: %w", workflow.Name, err)
+	id := uuid.Must(uuid.NewV7())
+
+	upsertedID, err := storage.InsertWorkflow(ctx, txer, workflow.Name, id, idempotencyKey, input, options)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert workflow [name = %s]: %w", workflow.Name, err)
+	}
+
+	return upsertedID, nil
+}
+
+// SendSignal delivers a typed signal to a running workflow.
+func SendSignal[I any](
+	ctx context.Context,
+	storage Storage,
+	txer TxBeginner,
+	workflowID uuid.UUID,
+	signal Signal[I],
+	input I,
+	opts ...SignalOption,
+) error {
+	// Provide default signal options with idempotency key first and then apply the provided ones
+	options := defaultSignalOptionsFor(
+		signal.IdempotencyKey(workflowID),
+	)
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	// Insert a signal with a specified id and idempotency key
+	id := uuid.Must(uuid.NewV7())
+	idempotencyKey := options.idempotencyKey
+
+	if err := storage.InsertSignal(ctx, txer, workflowID, id, idempotencyKey, signal.Name, input); err != nil {
+		return fmt.Errorf("insert signal [name = %s, workflow id = %s]: %w", signal.Name, workflowID, err)
 	}
 
 	return nil
