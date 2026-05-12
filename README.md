@@ -1,6 +1,6 @@
 # floww
 
-A lightweight, PostgreSQL-backed durable workflow engine for Go. Workflows are long-running orchestrations that coordinate a sequence of **activities** — individual units of work. Both are stored durably in Postgres, so they survive process restarts. The engine guarantees at-least-once execution, automatic retries with configurable backoff, stuck-task recovery, and idempotent scheduling.
+A lightweight, PostgreSQL-backed durable workflow engine for Go. Workflows are long-running orchestrations that coordinate a sequence of **activities** — individual units of work — and can pause to wait for external **signals**. Everything is stored durably in Postgres, so it survives process restarts. The engine guarantees at-least-once execution, automatic retries with configurable backoff, stuck-task recovery, and idempotent scheduling.
 
 Uses a short-polling mechanism for fetching updates, making it compatible with connection poolers in transaction mode.
 
@@ -10,11 +10,12 @@ floww follows the **event-sourcing execution model** (similar to Temporal/Cadenc
 
 1. When a workflow is enqueued a **workflow task** is immediately scheduled.
 2. The **WorkflowWorker** picks up the task and runs the workflow handler function from the very beginning.
-3. Inside the handler, calls to `ExecuteActivity` check a **history** of already-completed activities loaded from Postgres.
-   - If an activity is already in history its stored output is returned immediately.
-   - If not, the activity is scheduled in Postgres and the workflow is **suspended** by returning `ErrWorkflowSuspended`.
+3. Inside the handler, calls to `ExecuteActivity` and `ReceiveSignal` check a **history** of already-completed events loaded from Postgres.
+   - If the event is already in history its stored output is returned immediately.
+   - If not, the activity is scheduled (or the signal is awaited) and the workflow is **suspended** by returning `ErrWorkflowSuspended`.
 4. The **ActivityWorker** picks up the pending activity, executes its handler, writes the output to Postgres, and schedules a new workflow task to resume the workflow.
-5. Steps 2–4 repeat until the workflow handler returns without suspending, at which point the workflow is marked completed.
+5. An external caller can unblock a waiting workflow at any time by calling `SendSignal`, which also schedules a new workflow task.
+6. Steps 2–5 repeat until the workflow handler returns without suspending, at which point the workflow is marked completed.
 
 Because the handler always re-executes from the top, workflow logic must be **deterministic** — side effects belong in activities, not in the workflow function itself.
 
@@ -26,36 +27,37 @@ EnqueueWorkflow
                                 │
                         WorkflowWorker picks up
                                 │
-                    Run handler (replay history)
-                       │              │
-               activity in        activity NOT in
-                history               history
-                   │                    │
-             return output         InsertActivity
-                                        │
-                               [floww_activities] (pending)
-                                        │
-                               ActivityWorker picks up
-                                        │
-                               Execute handler
-                                        │
-                               CompleteActivity +
-                               schedule new workflow task
-                                        │
-                               WorkflowWorker resumes …
+              Run handler (replay history + signals)
+                 │                            │
+         event in history             event NOT in history
+                 │                            │
+           return value               schedule activity
+                                      OR await signal
+                                             │
+                              ┌──────────────┴──────────────┐
+                              │                             │
+                     ActivityWorker                   SendSignal (external)
+                     completes activity               inserts signal record
+                              │                             │
+                      CompleteActivity +            schedule workflow task
+                      schedule workflow task                │
+                              └──────────────┬─────────────┘
+                                             │
+                                    WorkflowWorker resumes …
 ```
 
 ## Features
 
-- **Durable execution** — workflows and activities survive crashes and restarts
-- **Event-sourcing replay** — workflow handlers re-execute deterministically using completed activity history
-- **Typed generics API** — `Workflow[I]`, `Activity[I, O]`, and `Future[O]` carry compile-time types
+- **Durable execution** — workflows, activities, and signals survive crashes and restarts
+- **Event-sourcing replay** — workflow handlers re-execute deterministically using a unified history of completed activities and received signals
+- **Signals** — external events that pause a workflow until a named message arrives, then resume it
+- **Typed generics API** — `Workflow[I]`, `Activity[I, O]`, `Signal[I]`, and `Future[O]` carry compile-time types
 - **At-least-once delivery** — both workers recover stuck tasks automatically
-- **Idempotent scheduling** — duplicate workflow or activity submissions with the same key are silently ignored
+- **Idempotent scheduling** — duplicate workflow, activity, or signal submissions with the same key are silently ignored
 - **Priority scheduling** — higher-priority work is always picked up first
 - **Delayed execution** — schedule workflows and activities for a future time
 - **Configurable retries and backoff** — per-handler custom `BackoffCalculator`; unrecoverable errors skip retries immediately
-- **Concurrent processing** — bounded concurrency via `errgroup`
+- **Concurrent processing** — bounded concurrency via semaphore
 - **Graceful shutdown** — workers drain in-flight tasks before stopping
 - **Pluggable encoder** — JSON by default; swap in any `Encoder`
 - **Custom storage** — implement the `Storage` interface to use a different backend
@@ -75,7 +77,7 @@ go get github.com/sknv/floww
 
 ## Database Setup
 
-Apply the migration to create the three required tables and their indexes:
+Apply the migration to create the required tables and their indexes:
 
 ```bash
 psql -d your_database -f init_floww.up.sql
@@ -86,8 +88,9 @@ The migration creates:
 - `floww_workflows` — one row per workflow instance
 - `floww_workflow_tasks` — resumption tasks that drive workflow re-execution
 - `floww_activities` — individual activity runs with input/output storage
+- `floww_signals` — durable signal records delivered to workflow instances
 
-All three tables have partial indexes optimised for the polling queries and an `updated_at` trigger.
+All tables have partial indexes optimised for the polling queries and an `updated_at` trigger.
 
 ## Quick Start
 
@@ -177,10 +180,151 @@ func fanOutHandler(ctx *floww.WorkflowContext, input MyInput) error {
 }
 ```
 
-## Enqueueing Workflows
+### Running the same activity multiple times
+
+Activity idempotency keys are derived from the activity name and the workflow ID, so the same activity cannot be inserted twice by default. When you need to run the same activity more than once — for example, inside a loop — use `WithActivityIdempotencyKey` or `Activity.IdempotencyKeyByString` to give each invocation a distinct key:
 
 ```go
-err = floww.EnqueueWorkflow(ctx, storage, db, myWorkflow,
+func batchHandler(ctx *floww.WorkflowContext, input BatchInput) error {
+    for i, item := range input.Items {
+        // Derive a unique key per iteration so each run is tracked independently
+        key := processItem.IdempotencyKeyByString(ctx.WorkflowID(), strconv.Itoa(i))
+
+        _, err := floww.ExecuteActivity(ctx, processItem, item,
+            floww.WithActivityIdempotencyKey(key),
+        )
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+## Signals
+
+Signals are durable, named messages that can be sent to a running workflow from outside. A workflow can pause and wait for a signal, just like it waits for an activity. When the signal arrives the workflow is woken up; on the next replay the signal value is returned immediately from history.
+
+### Defining a signal
+
+```go
+type ApprovalPayload struct {
+    ApprovedBy string
+    Note       string
+}
+
+var approvalSignal = floww.NewSignal[ApprovalPayload]("order-approved")
+```
+
+### Receiving a signal in a workflow handler
+
+```go
+func processOrderHandler(ctx *floww.WorkflowContext, input OrderInput) error {
+    // Step 1: charge the card
+    receipt, err := floww.ExecuteActivity(ctx, chargeCard, ChargeInput{Amount: input.Amount})
+    if err != nil {
+        return err
+    }
+
+    // Step 2: wait for a human approval — suspends until the signal arrives
+    approval, err := floww.ReceiveSignal(ctx, approvalSignal)
+    if err != nil {
+        return err // ErrWorkflowSuspended until the signal is sent
+    }
+
+    // Step 3: fulfil the order — only reached after approval
+    _, err = floww.ExecuteActivity(ctx, fulfillOrder, FulfillInput{
+        ReceiptID:  receipt.ID,
+        ApprovedBy: approval.ApprovedBy,
+    })
+    return err
+}
+```
+
+Use `ReceiveSignalAsync` to wait for multiple signals concurrently, mirroring `ExecuteActivityAsync`:
+
+```go
+func reviewHandler(ctx *floww.WorkflowContext, input ReviewInput) error {
+    futApproval, err := floww.ReceiveSignalAsync(ctx, approvalSignal)
+    if err != nil { return err }
+
+    futRejection, err := floww.ReceiveSignalAsync(ctx, rejectionSignal)
+    if err != nil { return err }
+
+    // Whichever signal arrives first will be present in history; the other
+    // will still return ErrWorkflowSuspended.
+    if approval, err := futApproval.Get(); err == nil {
+        return floww.ExecuteActivity(ctx, approve, approval)
+    }
+    if rejection, err := futRejection.Get(); err == nil {
+        return floww.ExecuteActivity(ctx, reject, rejection)
+    }
+
+    return ErrWorkflowSuspended // neither signal has arrived yet
+}
+```
+
+### Sending a signal
+
+```go
+err := floww.SendSignal(ctx, storage, db, workflowID, approvalSignal,
+    ApprovalPayload{ApprovedBy: "alice", Note: "looks good"},
+)
+```
+
+Pass a `pgx.Tx` as the `txer` argument to send the signal atomically alongside your own database write:
+
+```go
+tx, _ := db.Begin(ctx)
+defer tx.Rollback(ctx)
+
+_, _ = tx.Exec(ctx, `UPDATE orders SET approved = true WHERE id = $1`, orderID)
+
+err := floww.SendSignal(ctx, storage, tx, workflowID, approvalSignal,
+    ApprovalPayload{ApprovedBy: "alice", Note: "looks good"},
+)
+if err != nil { ... }
+
+tx.Commit(ctx)
+```
+
+### Signal idempotency
+
+Each signal is identified by an idempotency key. By default the key is derived from the signal name and the workflow ID, so the same named signal can only be received once per workflow. To send multiple signals of the same type — for example, a stream of progress updates — pass a unique key per send using `WithSignalIdempotencyKey`:
+
+```go
+for i, update := range updates {
+    key := progressSignal.IdempotencyKeyByString(workflowID, strconv.Itoa(i))
+
+    err := floww.SendSignal(ctx, storage, db, workflowID, progressSignal, update,
+        floww.WithSignalIdempotencyKey(key),
+    )
+    if err != nil { ... }
+}
+```
+
+On the receiving side, use the matching key so each invocation resolves to a distinct history entry:
+
+```go
+for i := range expectedUpdates {
+    key := progressSignal.IdempotencyKeyByString(ctx.WorkflowID(), strconv.Itoa(i))
+
+    update, err := floww.ReceiveSignal(ctx, progressSignal,
+        floww.WithSignalIdempotencyKey(key),
+    )
+    if err != nil {
+        return err
+    }
+    _ = update
+}
+```
+
+## Enqueueing Workflows
+
+`EnqueueWorkflow` returns the ID of the workflow that was created (or the ID of the existing workflow if a duplicate idempotency key was submitted). Store it to send signals later.
+
+```go
+workflowID, err := floww.EnqueueWorkflow(ctx, storage, db, myWorkflow,
     idempotencyKey, // uuid.UUID — reuse to deduplicate
     input,
     floww.WithWorkflowPriority(10),
@@ -205,10 +349,17 @@ Pass a `pgx.Tx` as the `txer` argument to enqueue atomically within your own tra
 
 | Option | Default | Description |
 |---|---|---|
+| `WithActivityIdempotencyKey(k)` | derived from name+workflow | Override the idempotency key (use when running the same activity more than once) |
 | `WithActivityPriority(n)` | `0` | Higher values are processed first |
 | `WithActivityMaxAttempts(n)` | `1` | Max attempts before the activity (and workflow) fails |
 | `WithActivityStuckTimeout(d)` | `5m` | How long a running activity may be silent before recovery |
 | `WithActivityScheduledAt(t)` | `now()` | Earliest time the activity will be picked up |
+
+### Signal options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithSignalIdempotencyKey(k)` | derived from name+workflow | Override the idempotency key (use when sending the same signal more than once) |
 
 ## Starting and Stopping Workers
 
@@ -323,7 +474,7 @@ if err := workflowWorker.CleanDeadWorkflows(ctx); err != nil {
 }
 ```
 
-Activity records are removed automatically via `ON DELETE CASCADE` when their parent workflow is deleted.
+Activity and signal records are removed automatically via `ON DELETE CASCADE` when their parent workflow is deleted.
 
 ## Custom Encoder
 
@@ -346,7 +497,7 @@ type Encoder interface {
 
 ## Custom Storage
 
-Implement the `Storage` interface to use a different database backend:
+Implement the `Storage` interface to use a different database backend.
 
 ## Workflow Lifecycle
 
@@ -354,10 +505,11 @@ Implement the `Storage` interface to use a different database backend:
 EnqueueWorkflow
       │
       ▼
-   running ──► workflow task fires ──► handler suspends (activity pending)
-      │                 ▲                        │
-      │                 │                activity completes
-      │                 └──── new workflow task scheduled
+   running ──► workflow task fires ──► handler suspends
+      │                 ▲              (activity pending OR signal not yet received)
+      │                 │                        │
+      │                 │         activity completes OR signal sent
+      │                 └──────── new workflow task scheduled
       │
       ├──► completed   (handler returned nil with no suspension)
       └──► failed      (attempts >= maxAttempts  OR  Unrecoverable error)
@@ -369,7 +521,8 @@ Because the handler re-executes from scratch on every workflow task, a few rules
 
 - **Put all side effects in activities.** Network calls, database writes, random number generation, and anything non-deterministic must live inside an activity handler, not in the workflow function.
 - **Do not use wall-clock time inside the handler.** Use `WithActivityScheduledAt` to delay an activity instead.
-- **Keep the step order stable.** Activity idempotency keys are derived by hashing the activity name against the workflow ID, so reordering or removing steps across deployments would cause history mismatches for in-flight workflows.
+- **Keep the step order stable.** Activity and signal idempotency keys are derived from their name and the workflow ID. Reordering or removing steps across deployments would cause history mismatches for in-flight workflows.
+- **Use `IdempotencyKeyByString` for repeated steps.** If you need to run the same activity or receive the same signal more than once, pass a unique discriminator (e.g. a loop index) so each invocation maps to a distinct history entry.
 
 ## License
 

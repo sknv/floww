@@ -6,12 +6,17 @@ import (
 	"github.com/samber/mo"
 )
 
-// Future represents the pending result of an asynchronous activity execution.
-type Future[O any] struct {
-	event mo.Option[HistoryEvent]
+// Valuer decodes the raw value into v.
+type Valuer interface {
+	IntoValue(v any) error
 }
 
-// Get returns the activity output, or ErrWorkflowSuspended if the activity has not yet completed.
+// Future represents the pending result of an asynchronous event execution.
+type Future[O any] struct {
+	event mo.Option[Valuer]
+}
+
+// Get returns the event output, or ErrWorkflowSuspended if the event has not yet completed.
 //
 //nolint:ireturn // returns a generic result
 func (f Future[O]) Get() (O, error) {
@@ -21,8 +26,8 @@ func (f Future[O]) Get() (O, error) {
 		return out, ErrWorkflowSuspended
 	}
 
-	if err := f.event.MustGet().IntoOutput(&out); err != nil {
-		return out, fmt.Errorf("decode history event output: %w", err)
+	if err := f.event.MustGet().IntoValue(&out); err != nil {
+		return out, fmt.Errorf("decode future event value: %w", err)
 	}
 
 	return out, nil

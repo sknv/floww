@@ -152,10 +152,10 @@ COMMENT ON COLUMN floww_activities.priority IS 'Приоритет выполн�
 COMMENT ON COLUMN floww_activities.attempts IS 'Текущее число попыток запуска задачи';
 COMMENT ON COLUMN floww_activities.max_attempts IS 'Максимальное число попыток запуска задачи';
 COMMENT ON COLUMN floww_activities.stuck_timeout_millis IS 'Промежуток времени в миллисекундах, после которого задача считается зависшей';
-COMMENT ON COLUMN floww_activities.scheduled_at IS 'Время в которое запланирован запуск задачи';
-COMMENT ON COLUMN floww_activities.run_at IS 'Время в которое задача была запущена';
+COMMENT ON COLUMN floww_activities.scheduled_at IS 'Время, в которое запланирован запуск задачи';
+COMMENT ON COLUMN floww_activities.run_at IS 'Время, в которое задача была запущена';
 COMMENT ON COLUMN floww_activities.stuck_at IS 'Время, после которого задача считается зависшей';
-COMMENT ON COLUMN floww_activities.completed_at IS 'Время в которое задача была завершена';
+COMMENT ON COLUMN floww_activities.completed_at IS 'Время, в которое задача была завершена';
 COMMENT ON COLUMN floww_activities.error_message IS 'Последнее сообщение об ошибке';
 
 -- Триггер для автоматического обновления updated_at таймстемпа
@@ -177,3 +177,25 @@ WHERE status = 'running';
 -- Индекс для поиска по внешнему ключу
 CREATE INDEX IF NOT EXISTS idx__floww_activities__workflow_id_and_status
 ON floww_activities (workflow_id, status);
+
+--
+-- Сигналы
+--
+
+CREATE TABLE floww_signals (
+  id              uuid        PRIMARY KEY DEFAULT uuidv7(),
+  idempotency_key uuid        NOT NULL CONSTRAINT chk__floww_signals__unique_idempotency_key UNIQUE,
+  workflow_id     uuid        NOT NULL REFERENCES floww_workflows (id) ON DELETE CASCADE,
+  name            text        NOT NULL,
+  input           bytea,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  floww_signals IS 'Сигналы';
+COMMENT ON COLUMN floww_signals.idempotency_key IS 'Ключ идемпотентности';
+COMMENT ON COLUMN floww_signals.name IS 'Имя сигнала';
+COMMENT ON COLUMN floww_signals.input IS 'Входящие параметры для сигнала';
+
+-- Индекс для поиска по внешнему ключу
+CREATE INDEX IF NOT EXISTS idx__floww_signals__workflow_id
+ON floww_signals (workflow_id);

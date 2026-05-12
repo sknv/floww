@@ -120,5 +120,7 @@ func main() {
 		}
 	})
 
+	wg.Wait()
+
 	log.Println("Process stopped")
 }
