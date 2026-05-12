@@ -8,13 +8,14 @@ import (
 	"github.com/samber/mo"
 )
 
-// WorkflowContext is passed to workflow handlers and provides access to activity scheduling and workflow metadata.
+// WorkflowContext is passed to workflow handlers and provides access to activity scheduling,
+// signal reception, and workflow metadata.
 type WorkflowContext struct {
 	ctx        context.Context //nolint:containedctx // wrapper
 	workflowID uuid.UUID
 	storage    Storage
-	history    Events
-	signals    Events
+	history    Events // completed activity outputs, keyed by activity idempotency key
+	signals    Events // all signals ever delivered to this workflow, keyed by signal idempotency key
 }
 
 // NewWorkflowContext constructs a WorkflowContext for the given workflow execution.
@@ -103,8 +104,17 @@ func ExecuteActivity[I any, O any](
 	return future.Get()
 }
 
-// ReceiveSignalAsync is the non-blocking form, mirroring ExecuteActivityAsync.
-// Callers can fan out multiple ReceiveSignalAsync calls and then call Get on each.
+// ReceiveSignalAsync is the non-blocking form of ReceiveSignal, mirroring ExecuteActivityAsync.
+//
+// It looks up the signal by its idempotency key in the loaded signal history:
+//   - If the signal is present (sent before this execution), the Future resolves immediately.
+//     This covers both the live case (signal arrived before this replay) and the replay case
+//     (signal was already present in a previous execution), ensuring the handler always sees
+//     the same value for the same key regardless of how many times it replays.
+//   - If the signal is absent, the Future resolves to ErrWorkflowSuspended when Get is called.
+//
+// Use ReceiveSignalAsync when waiting for multiple signals concurrently: call
+// ReceiveSignalAsync for each, then call Get on each Future to check which have arrived.
 func ReceiveSignalAsync[I any](
 	ctx *WorkflowContext,
 	signal Signal[I],
@@ -132,8 +142,13 @@ func ReceiveSignalAsync[I any](
 	}, nil
 }
 
-// ReceiveSignal returns the pending signal of this type,
-// or suspends the workflow if none has arrived yet.
+// ReceiveSignal returns the payload of the signal identified by the given key,
+// or suspends the workflow (returning ErrWorkflowSuspended) if the signal has
+// not yet been sent.
+//
+// On every replay the same idempotency key is computed from the signal name and
+// the workflow ID, so the handler always receives the same value for the same
+// signal call — the signal record stays in storage and is never consumed or deleted.
 //
 //nolint:ireturn // returns a generic result
 func ReceiveSignal[I any](

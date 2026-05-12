@@ -12,7 +12,9 @@ import (
 )
 
 // InsertSignal durably delivers a signal to a workflow and schedules a workflow task
-// to wake it up. Both writes happen inside one transaction.
+// to wake it up. Both writes happen inside one transaction so the workflow is
+// guaranteed to replay and see the signal, and no task is ever scheduled without
+// a corresponding signal record.
 func (s *Storage) InsertSignal(
 	ctx context.Context,
 	txer floww.TxBeginner,
@@ -47,6 +49,12 @@ func (s *Storage) InsertSignal(
 }
 
 // insertSignal inserts a signal record into storage.
+//
+// IMPORTANT:
+//   - Must be called within a transaction together with insertWorkflowTask.
+//   - Signal records are never deleted or marked consumed; they remain in storage
+//     for the lifetime of the workflow and are re-loaded on every replay so the
+//     handler always receives the same value for the same idempotency key.
 func (s *Storage) insertSignal(
 	ctx context.Context,
 	execer floww.Execer,
@@ -88,13 +96,13 @@ func (s *Storage) insertSignal(
 	return nil
 }
 
-// signalEventRecord holds data to construct an signal event.
+// signalEventRecord holds data to construct a signal event.
 type signalEventRecord struct {
 	IdempotencyKey uuid.UUID
 	Input          []byte
 }
 
-// ToSignalEvent converts a raw DB record into an signal event.
+// ToSignalEvent converts a raw DB record into a signal event.
 //
 // IMPORTANT:
 // - Decoding is deferred to the provided decoder to allow custom serialization formats.
@@ -103,9 +111,15 @@ func (e signalEventRecord) ToSignalEvent(decoder floww.Decoder) floww.Event {
 	return floww.NewEvent(e.IdempotencyKey, e.Input, decoder)
 }
 
-// ListWorkflowSignals returns all unconsumed signals for a workflow,
-// ordered by arrival time (id ASC). Called once at the start of each workflow
-// task execution.
+// ListWorkflowSignals returns all signals ever delivered to a workflow, keyed by
+// their idempotency key. It is called once at the start of each workflow task
+// execution and the result is handed to WorkflowContext so that ReceiveSignal can
+// look up signals by key in O(1).
+//
+// Signal records are never deleted or marked consumed — they act as permanent
+// history entries, exactly like completed activity outputs. This guarantees that
+// a workflow handler always receives the same value for the same signal key on
+// every replay, with no risk of a signal being "lost" between executions.
 func (s *Storage) ListWorkflowSignals(ctx context.Context, workflowID uuid.UUID) (floww.Events, error) {
 	const sql = `
 		SELECT idempotency_key, input
